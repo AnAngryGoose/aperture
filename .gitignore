@@ -1,0 +1,31 @@
+# Build outputs
+/bin/
+
+# Local SQLite database (and its WAL / SHM journal companions)
+aperture.db
+aperture.db-shm
+aperture.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend build artifacts
+/web/build/
+/web/.svelte-kit/
+/web/node_modules/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Local env files (never commit secrets or per-host overrides)
+.env
+.env.local
+
+# Note: /opt/aperture-roadmap.docx lives outside this repo and is intentionally not vendored.
