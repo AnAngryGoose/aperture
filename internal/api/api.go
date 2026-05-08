@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -24,10 +25,16 @@ import (
 type Server struct {
 	hub       *hub.Hub
 	evaluator *alerts.Evaluator
+	version   string
+	startedAt time.Time
 }
 
-func NewServer(h *hub.Hub, ev *alerts.Evaluator) *Server {
-	return &Server{hub: h, evaluator: ev}
+// NewServer builds the HTTP server. version + startedAt are surfaced via
+// /api/system/info; the store's path is read directly from h.Store().Path()
+// at request time so a future runtime DB swap (not currently supported)
+// would Just Work.
+func NewServer(h *hub.Hub, ev *alerts.Evaluator, version string, startedAt time.Time) *Server {
+	return &Server{hub: h, evaluator: ev, version: version, startedAt: startedAt}
 }
 
 // Router builds the chi router. webFS may be nil during early development
@@ -43,11 +50,13 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", s.health)
+		r.Get("/system/info", s.systemInfo)
 		r.Get("/hosts", s.listHosts)
 		r.Get("/hosts/{id}", s.getHost)
 		r.Get("/hosts/{id}/metrics/latest", s.latestMetric)
 		r.Get("/hosts/{id}/metrics", s.metricsRange)
 		r.Get("/hosts/{id}/containers", s.listContainers)
+		r.Post("/hosts/{id}/containers", s.containerCreate)
 		r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
 		r.Delete("/hosts/{id}/containers/{cid}", s.containerRemove)
 		r.Get("/hosts/{id}/containers/{cid}/logs", s.containerLogs)
@@ -91,6 +100,32 @@ func spaHandler(webFS fs.FS) http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "time": time.Now().UTC()})
+}
+
+func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) {
+	info := types.SystemInfo{
+		Version:   s.version,
+		StartedAt: s.startedAt,
+		DBPath:    s.hub.Store().Path(),
+	}
+	// Include the WAL and SHM companions in the size — between checkpoints
+	// the WAL can be a non-trivial fraction of total on-disk footprint, and
+	// for retention/footprint sizing the user probably wants the truth.
+	info.DBSizeBytes = sizeOnDisk(info.DBPath) +
+		sizeOnDisk(info.DBPath+"-wal") +
+		sizeOnDisk(info.DBPath+"-shm")
+	writeJSON(w, http.StatusOK, info)
+}
+
+// sizeOnDisk returns the file size for path, or 0 if it doesn't exist.
+// Missing companions (e.g. -wal when WAL is checkpointed and not yet
+// re-created) are normal, not an error.
+func sizeOnDisk(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
 }
 
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +203,32 @@ func (s *Server) listContainers(w http.ResponseWriter, r *http.Request) {
 		cs = []types.Container{}
 	}
 	writeJSON(w, http.StatusOK, cs)
+}
+
+func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	var spec types.CreateSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	cid, err := d.Create(r.Context(), spec)
+	if err != nil {
+		// Surface partial-success: the container may have been created but
+		// failed to start (Create returns the id alongside the start error).
+		if cid != "" {
+			writeJSON(w, http.StatusAccepted, map[string]any{"id": cid, "warning": err.Error()})
+			return
+		}
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": cid})
 }
 
 func (s *Server) containerAction(w http.ResponseWriter, r *http.Request) {

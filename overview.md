@@ -4,19 +4,32 @@ A single pane of glass for homelab command-and-control. Aperture is a self-hoste
 
 ## What it does (current state)
 
-**v0.1 (in progress)** — monitoring + docker container management:
+**v0.1.0** — monitoring + docker container management. The first usable release. Scope:
 
 - Auto-discovers the local host, samples its system metrics every few seconds, and stores them in SQLite.
 - Lists all docker containers on the host with live CPU/memory stats.
 - Web dashboard:
   - Host overview cards (CPU, memory, disk, container count) with auto-refresh.
   - Per-host detail view with charts for CPU, memory, disk, network throughput, and load average across configurable time ranges (15m / 1h / 6h / 24h).
-  - Container management: start, stop, pause, unpause, restart, kill, remove, view logs.
+  - Container management: create (surface form: image, name, restart policy, env, ports, volumes, auto-start), start, stop, pause, unpause, restart, kill, remove, view logs.
 - Threshold-based alerts: configurable rules per host (or all hosts) on cpu/mem/disk/swap/load with optional sustained-breach duration; live event history with auto-resolve when the breach ends; nav badge with currently-firing count.
 
 ## Why it exists
 
 Off-the-shelf homelab tools are excellent in their niches (beszel for monitoring, dockge for compose, portainer for containers, etc.) but operating a homelab means stitching their UIs together. Aperture's premise is to consolidate the read and write paths into one application designed for extensibility, security, and scalability as the homelab grows.
+
+## Design philosophy: clean surface, deep ability
+
+The core UX principle for every feature in aperture: present a **glanceable summary view** by default, with the ability to **drill into granular detail on demand**. Two layers, one feature, never separate "advanced" sections buried in menus.
+
+| Layer | Answers | What it shows |
+| --- | --- | --- |
+| **Surface** | "Is everything okay?" | Health indicators, status pills, sparklines, quick-action buttons, badge counts. Optimized for one-glance scanning and minimal-click common operations. |
+| **Deep** | "Why? Show me everything." | Full data, raw values, historical trends, editable configuration, raw JSON/YAML when needed. Optimized for power and explainability. |
+
+The transition between the two must feel seamless: clicking a host card *navigates* to the host detail page, clicking a container row *expands* to actions and logs, clicking a metric chart *opens* a detail panel. **Every** major feature in this codebase — current and future — should implement both layers. If a proposed feature has only a surface or only a deep view, that's a design smell worth raising before it ships.
+
+This is not progressive disclosure for its own sake. It's about making the common case fast without sacrificing power for the complex case.
 
 ## How it's structured
 
@@ -64,6 +77,7 @@ aperture/
 │   ├── hub/        Hub binary entry point
 │   └── agent/      Future remote-agent binary (placeholder in v0.1)
 ├── internal/
+│   ├── alerts/     Threshold rule evaluator (sustained-breach, auto-resolve)
 │   ├── api/        HTTP handlers + chi router + SPA fallback
 │   ├── collector/  Local system-metrics sampler (gopsutil)
 │   ├── dockerctl/  Docker engine wrapper (list, lifecycle, logs)
@@ -170,14 +184,23 @@ All endpoints live under `/api`. Responses are JSON unless noted.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | Liveness probe. |
+| GET | `/api/system/info` | Hub version, started-at timestamp, SQLite DB path, and total on-disk size (`aperture.db` + `-wal` + `-shm`). Used by the layout footer. |
 | GET | `/api/hosts` | List all known hosts. |
 | GET | `/api/hosts/{id}` | Get a single host. |
 | GET | `/api/hosts/{id}/metrics/latest` | Most recent metric sample. |
 | GET | `/api/hosts/{id}/metrics?range=1h&points=300` | Down-sampled samples for the range. |
 | GET | `/api/hosts/{id}/containers?all=true` | Containers on the host. |
+| POST | `/api/hosts/{id}/containers` | Create container from a surface-layer spec (image, name, restart policy, env, ports, volumes, auto-start). Pulls image if missing. Returns `{id}` on success, `{id, warning}` (HTTP 202) if the container was created but failed to start. |
 | POST | `/api/hosts/{id}/containers/{cid}/start` | (also `stop`, `restart`, `pause`, `unpause`, `kill?signal=…`) |
 | DELETE | `/api/hosts/{id}/containers/{cid}?force=&volumes=` | Remove container. |
 | GET | `/api/hosts/{id}/containers/{cid}/logs?tail=200` | Plaintext logs. |
+| GET | `/api/alerts/metadata` | Supported metrics + ops for UI dropdowns. |
+| GET | `/api/alerts/rules?host_id=` | List rules; if `host_id` is set, only rules applicable to that host (matching id or `NULL` = all hosts). |
+| POST | `/api/alerts/rules` | Create a rule. Body: `{host_id?, metric, op, threshold, duration_s, enabled?}`. Empty `host_id` means "all hosts". |
+| GET | `/api/alerts/rules/{id}` | Fetch one rule. |
+| PUT | `/api/alerts/rules/{id}` | Update a rule (full replace). |
+| DELETE | `/api/alerts/rules/{id}` | Delete a rule. Cascades to its event history and clears in-memory evaluator state. |
+| GET | `/api/alerts/events?host_id=&open=&limit=` | Event history. `open=true` returns currently-firing events only; default `limit=200`. |
 
 `range` accepts any Go-style duration (`15m`, `6h`, `24h`). `points` caps the returned series via uniform stride downsampling.
 
@@ -191,8 +214,27 @@ All endpoints live under `/api`. Responses are JSON unless noted.
 
 ## Roadmap (post-v0.1)
 
-- Threshold-based alert evaluator + UI.
-- Container *create* (compose-style or one-off).
-- Remote-agent binary + transport (the hub-side abstractions are ready).
-- Authentication.
-- Embedded frontend via `embed.FS` so a single binary needs no `-web-dir`.
+The full roadmap lives in `/opt/aperture-roadmap.docx` (canonical source). Aperture is intended to consolidate Dozzle (logs), Beszel (metrics), Portainer/Dockge (containers/stacks), and other single-purpose dashboards into one tool. The eight numbered sections below are in rough dependency order — not a strict execution order; work lands in whichever order is most logical given current state.
+
+1. **Solidify the core** — agent ↔ hub auth (mTLS or token), auto-reconnect, heartbeats, agent registration/discovery, stale-data UI; WebUI stabilization (component library, responsive desktop-first, error/feedback patterns); container lifecycle complete (recreate, restart policy, resource limits, env vars, port editing).
+2. **Compose-first workflow** — discover/import existing `docker-compose.yml` from configurable paths per host; YAML + visual editor with autocomplete and validation; deploy/teardown/rebuild/per-service actions; git-style version diffs and rollback; service dependency graph.
+3. **Deep docker management** — networks (list, attach, topology graph), volumes (list, orphan detection, growth), images (list, registry update detection, layer inspection, dangling cleanup), log streaming (Dozzle replacement: live tail, multi-container interleave, regex search, time windowing, export).
+4. **Metrics, storage & host overview** — multi-host system metrics (per-core CPU, mem incl. per-process top, per-iface net, per-device disk I/O, temps, retention with downsampling); container-level metrics (limit-vs-actual, healthcheck history, restart counts); storage depth (ZFS pools/scrub/snapshots, RAID arrays, NFS/SMB mounts, SMART per-drive, growth projections).
+5. **Alerting & notifications** — extend the existing rules: container state alerts, storage alerts (ZFS degraded, SMART), agent-offline, network alerts, severities (info/warn/crit); channels (Discord/Slack/ntfy/Gotify/generic webhook, SMTP, SMS); per-channel severity filters; cooldown/dedup; ack/silence; escalation paths.
+6. **Network scanning & overview** — subnet discovery (hostname, MAC/OUI, OS fingerprint, port scan), scheduled scans with change detection, device inventory with custom labels, unknown-device alerts; OPNsense integration (firewall rules, interface health, DHCP leases, state table, VPN tunnels, Unbound DNS log); visual network topology map; latency monitoring.
+7. **Ansible integration** — playbook discovery from filesystem paths; in-app YAML editor; library with tags/search; variable mgmt incl. vault; run against hosts/groups picked from agent inventory; streaming stdout/stderr; execution history; dry-run; cron-style scheduling; auto-generated dynamic inventory from agent registry.
+8. **Reverse proxy & multi-user** — Traefik first (label injection on stack deploy), then Caddy and nginx-proxy-manager behind a provider interface; routing table with SSL cert status + expiry warnings; local auth with RBAC (admin / operator / viewer); audit log; sessions + 2FA; optional OIDC/LDAP.
+
+### Architecture considerations to lock in early
+
+These are non-negotiable groundwork for items late in the list — defer the *feature*, not the architectural seam:
+
+- **API-first** — every WebUI action goes through a documented REST API, versioned `/v1` from day one. Enables CLI, mobile, third-party integrations without rework.
+- **Data retention tiers** — high-resolution (minutes) for 24h, medium (hourly) for 30d, low (daily) for 1y+. Auto-downsampling. Configurable per metric type.
+- **Agent capabilities** — agents report capabilities on registration ("I have ZFS", "I have Ansible"). Hub gracefully handles mixed-capability agents. Agent auto-update mechanism.
+- **Pluggable providers** — notification channels, reverse-proxy integrations, metric collectors, network scanners as extension points so community contributions land without modifying core.
+- **Security from day 1** — encrypted agent ↔ hub (mTLS preferred), no plaintext secrets in DB, API auth even in single-user mode, audit logging infrastructure before multi-user lands.
+
+### Future-scope ideas (no fixed order)
+
+Scheduled tasks/cron management; DNS management (Pi-hole / AdGuard / Unbound integration); backup orchestration (Restic/Borg, schedule + retention + verification); service health dashboards (custom groupings, uptime SLA, dependency mapping); update management (image-update detection, one-click compose bump, host OS updates); secrets management (central store, rotation reminders, Ansible Vault integration); CLI companion (`aperture` CLI sharing the WebUI's API); plugin/extension system; Proxmox VM/LXC management; mobile-optimized UI with PWA push notifications.

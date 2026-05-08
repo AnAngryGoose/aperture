@@ -94,6 +94,49 @@ type AlertEvent struct {
 	Value      float64    `json:"value"`
 }
 
+// CreateSpec is the surface-layer container-create request: only the fields
+// needed for the common case (image, name, restart policy, env, ports,
+// volumes, auto-start). Deeper container config — capabilities, ulimits,
+// healthcheck spec, security opts, network aliases, etc. — waits for the
+// compose-first work in roadmap section 2, where editing a full spec is
+// natural via YAML.
+type CreateSpec struct {
+	Image         string            `json:"image"`
+	Name          string            `json:"name,omitempty"`
+	RestartPolicy string            `json:"restart_policy,omitempty"` // "", "no", "on-failure", "always", "unless-stopped"
+	Env           map[string]string `json:"env,omitempty"`
+	Ports         []PortBinding     `json:"ports,omitempty"`
+	Volumes       []VolumeBinding   `json:"volumes,omitempty"`
+	AutoStart     bool              `json:"auto_start"`
+}
+
+type PortBinding struct {
+	HostPort      int    `json:"host_port"`      // 0 = let docker pick
+	ContainerPort int    `json:"container_port"` // required
+	Protocol      string `json:"protocol"`       // tcp, udp; empty -> tcp
+}
+
+type VolumeBinding struct {
+	HostPath      string `json:"host_path"`      // required
+	ContainerPath string `json:"container_path"` // required
+	ReadOnly      bool   `json:"read_only"`
+}
+
+// SystemInfo is the small operational snapshot returned by /api/system/info.
+// Polled by the layout footer; intentionally cheap to compute (one stat() and
+// a few in-memory reads) so it can be hit frequently without measurable cost.
+//
+// The on-disk DB size includes the live `aperture.db` file plus its `-shm`
+// and `-wal` companions when WAL mode is active — that gives a more honest
+// number than reading the main file alone (the WAL can be a large fraction
+// of total bytes between checkpoints).
+type SystemInfo struct {
+	Version     string    `json:"version"`
+	StartedAt   time.Time `json:"started_at"`
+	DBPath      string    `json:"db_path"`
+	DBSizeBytes int64     `json:"db_size_bytes"`
+}
+
 // HostInfo is the static descriptor a metric source produces once at start.
 // MetricSource implementations populate this so the hub can register the host.
 type HostInfo struct {

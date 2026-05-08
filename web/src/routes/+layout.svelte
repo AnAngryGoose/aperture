@@ -1,12 +1,19 @@
 <script lang="ts">
+	import 'uplot/dist/uPlot.min.css';
 	import '$lib/styles.css';
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
+	import type { SystemInfo } from '$lib/types';
+	import { formatBytes, formatDuration } from '$lib/format';
 
 	let { children } = $props();
 	let firing = $state(0);
-	let timer: ReturnType<typeof setInterval> | null = null;
+	let sys = $state<SystemInfo | null>(null);
+	let now = $state(Date.now());
+	let alertTimer: ReturnType<typeof setInterval> | null = null;
+	let sysTimer: ReturnType<typeof setInterval> | null = null;
+	let clockTimer: ReturnType<typeof setInterval> | null = null;
 
 	async function refreshFiring() {
 		try {
@@ -17,12 +24,31 @@
 		}
 	}
 
+	async function refreshSystem() {
+		try {
+			sys = await api.systemInfo();
+		} catch {
+			// ignore — footer just hides if we can't reach the API
+		}
+	}
+
+	let uptimeSecs = $derived(
+		sys ? Math.max(0, Math.floor((now - new Date(sys.started_at).getTime()) / 1000)) : 0
+	);
+
 	onMount(() => {
 		refreshFiring();
-		timer = setInterval(refreshFiring, 5000);
+		refreshSystem();
+		alertTimer = setInterval(refreshFiring, 5000);
+		// DB size doesn't change quickly; 30s is plenty.
+		sysTimer = setInterval(refreshSystem, 30000);
+		// 1s clock so the uptime ticks visibly without polling the API.
+		clockTimer = setInterval(() => (now = Date.now()), 1000);
 	});
 	onDestroy(() => {
-		if (timer) clearInterval(timer);
+		if (alertTimer) clearInterval(alertTimer);
+		if (sysTimer) clearInterval(sysTimer);
+		if (clockTimer) clearInterval(clockTimer);
 	});
 </script>
 
@@ -49,6 +75,18 @@
 <main>
 	{@render children()}
 </main>
+
+<footer>
+	{#if sys}
+		<span class="mono">v{sys.version}</span>
+		<span class="sep">·</span>
+		<span title={sys.db_path}>DB {formatBytes(sys.db_size_bytes)}</span>
+		<span class="sep">·</span>
+		<span>uptime {formatDuration(uptimeSecs)}</span>
+	{:else}
+		<span>—</span>
+	{/if}
+</footer>
 
 <style>
 	header {
@@ -101,4 +139,18 @@
 		max-width: 1400px;
 		margin: 0 auto;
 	}
+	footer {
+		margin-top: 24px;
+		padding: 12px 24px;
+		border-top: 1px solid var(--border);
+		background: var(--bg-elev);
+		color: var(--text-dim);
+		font-size: 11px;
+		display: flex;
+		gap: 8px;
+		align-items: center;
+		justify-content: center;
+	}
+	footer .sep { opacity: 0.4; }
+	footer .mono { font-family: var(--mono); }
 </style>

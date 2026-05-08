@@ -23,16 +23,25 @@
 		yMax?: number;
 	} = $props();
 
-	let container: HTMLDivElement;
+	let canvasHost: HTMLDivElement;
 	let plot: uPlot | null = null;
 
 	const colors = ['#5cc8ff', '#7ce38b', '#ffcb6b', '#ff6b6b', '#c792ea'];
+
+	// Resolved per-series colors so the chip legend matches the rendered lines.
+	let strokes = $derived(series.map((s, i) => s.stroke ?? colors[i % colors.length]));
 
 	function buildOptions(width: number): Options {
 		return {
 			title,
 			width,
 			height,
+			// uPlot's built-in legend was overflowing into adjacent chart cards
+			// (single-series charts wasted a row, multi-series stacked vertically
+			// and bled into the next chart's header). Disable it and render a
+			// compact chip-row above the canvas in the wrapper instead — visible
+			// labels stay tied to colors, hover still works through the cursor.
+			legend: { show: false },
 			scales: {
 				x: { time: true },
 				y: yMin !== undefined || yMax !== undefined
@@ -67,12 +76,12 @@
 	}
 
 	onMount(() => {
-		const opts = buildOptions(container.clientWidth);
-		plot = new uPlot(opts, data(), container);
+		const opts = buildOptions(canvasHost.clientWidth);
+		plot = new uPlot(opts, data(), canvasHost);
 		const ro = new ResizeObserver(() => {
-			if (plot && container) plot.setSize({ width: container.clientWidth, height });
+			if (plot && canvasHost) plot.setSize({ width: canvasHost.clientWidth, height });
 		});
-		ro.observe(container);
+		ro.observe(canvasHost);
 		return () => ro.disconnect();
 	});
 
@@ -86,8 +95,36 @@
 	});
 </script>
 
-<div bind:this={container} class="chart" style="height: {height}px"></div>
+<div class="chart-wrap">
+	{#if series.length > 1}
+		<div class="legend">
+			{#each series as s, i}
+				<span class="chip">
+					<span class="dot" style="background: {strokes[i]}"></span>
+					{s.label}
+				</span>
+			{/each}
+		</div>
+	{/if}
+	<div bind:this={canvasHost} class="canvas-host" style="height: {height}px"></div>
+</div>
 
 <style>
-	.chart { width: 100%; }
+	.chart-wrap { width: 100%; }
+	.canvas-host { width: 100%; }
+	.legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 12px;
+		margin-bottom: 6px;
+		font-size: 11px;
+		color: var(--text-dim);
+	}
+	.chip { display: inline-flex; align-items: center; gap: 4px; }
+	.dot {
+		display: inline-block;
+		width: 8px;
+		height: 8px;
+		border-radius: 2px;
+	}
 </style>

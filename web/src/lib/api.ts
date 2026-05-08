@@ -4,7 +4,9 @@ import type {
 	Container,
 	AlertRule,
 	AlertEvent,
-	AlertMetadata
+	AlertMetadata,
+	CreateSpec,
+	SystemInfo
 } from './types';
 
 // In dev, the SvelteKit dev server runs on :5173 and the Go hub on :8080.
@@ -53,6 +55,7 @@ async function send<T>(path: string, method: 'POST' | 'PUT', body: unknown): Pro
 }
 
 export const api = {
+	systemInfo: () => get<SystemInfo>('/api/system/info'),
 	hosts: () => get<Host[]>('/api/hosts'),
 	host: (id: string) => get<Host>(`/api/hosts/${id}`),
 	latest: (id: string) => get<MetricSample | null>(`/api/hosts/${id}/metrics/latest`),
@@ -60,6 +63,8 @@ export const api = {
 		get<MetricSample[]>(`/api/hosts/${id}/metrics?range=${range}&points=${points}`),
 	containers: (id: string, all = true) =>
 		get<Container[]>(`/api/hosts/${id}/containers?all=${all}`),
+	createContainer: (hostID: string, spec: CreateSpec) =>
+		send<{ id: string; warning?: string }>(`/api/hosts/${hostID}/containers`, 'POST', spec),
 
 	containerAction: (hostID: string, cid: string, action: string) =>
 		post(`/api/hosts/${hostID}/containers/${cid}/${action}`),

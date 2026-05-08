@@ -69,6 +69,35 @@ export interface AlertMetadata {
 	ops: string[];
 }
 
+export interface CreatePortBinding {
+	host_port: number;
+	container_port: number;
+	protocol: string; // 'tcp' | 'udp'
+}
+
+export interface CreateVolumeBinding {
+	host_path: string;
+	container_path: string;
+	read_only: boolean;
+}
+
+export interface CreateSpec {
+	image: string;
+	name?: string;
+	restart_policy?: '' | 'no' | 'on-failure' | 'always' | 'unless-stopped';
+	env?: Record<string, string>;
+	ports?: CreatePortBinding[];
+	volumes?: CreateVolumeBinding[];
+	auto_start: boolean;
+}
+
+export interface SystemInfo {
+	version: string;
+	started_at: string;
+	db_path: string;
+	db_size_bytes: number;
+}
+
 export interface Container {
 	host_id: string;
 	id: string;

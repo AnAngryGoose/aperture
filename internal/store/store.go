@@ -15,7 +15,8 @@ import (
 var schemaSQL string
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 func Open(path string) (*Store, error) {
@@ -30,10 +31,14 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Path returns the on-disk path of the SQLite file. Used by the API to
+// stat the database for size reporting in /api/system/info.
+func (s *Store) Path() string { return s.path }
 
 // UpsertHost inserts or updates a host record and bumps last_seen.
 func (s *Store) UpsertHost(ctx context.Context, h types.Host) error {

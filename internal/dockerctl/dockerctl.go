@@ -17,7 +17,9 @@ import (
 	"github.com/aperture/aperture/internal/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 )
 
 type Client struct {
@@ -207,6 +209,117 @@ func stripLogHeaders(b []byte) string {
 		b = b[sz:]
 	}
 	return sb.String()
+}
+
+// Create makes a new container from the surface-layer spec and (optionally)
+// starts it. If the image isn't local, it's pulled before retrying create —
+// this keeps the common case (image already cached) fast while still working
+// for fresh images. Returns the new container's id.
+//
+// Surface scope: only image, name, restart policy, env, ports, volumes, and
+// auto-start are accepted. Deeper container configuration belongs in the
+// compose-first work (roadmap section 2) where YAML is the natural surface
+// for the long tail of options.
+func (c *Client) Create(ctx context.Context, spec types.CreateSpec) (string, error) {
+	if strings.TrimSpace(spec.Image) == "" {
+		return "", errors.New("image is required")
+	}
+
+	cfg, hostCfg, err := buildCreateConfig(spec)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, spec.Name)
+	if err != nil && client.IsErrNotFound(err) {
+		// Image not local — pull, then retry create once.
+		rc, perr := c.cli.ImagePull(ctx, spec.Image, image.PullOptions{})
+		if perr != nil {
+			return "", fmt.Errorf("pull %s: %w", spec.Image, perr)
+		}
+		// Drain the progress stream so the pull actually completes.
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+		resp, err = c.cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, spec.Name)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	if spec.AutoStart {
+		if serr := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); serr != nil {
+			// Container exists but didn't start — return the id with the error
+			// so the caller can decide whether to leave or remove it.
+			return resp.ID, fmt.Errorf("start: %w", serr)
+		}
+	}
+	return resp.ID, nil
+}
+
+// buildCreateConfig translates a CreateSpec into the docker SDK's container
+// and host configs. Pulled out for testability and to keep Create readable.
+func buildCreateConfig(spec types.CreateSpec) (*container.Config, *container.HostConfig, error) {
+	cfg := &container.Config{Image: spec.Image}
+
+	// Env: map -> []"K=V" with stable ordering (sort keys would be cleaner;
+	// for v0.1 the docker create order doesn't affect runtime semantics).
+	if len(spec.Env) > 0 {
+		env := make([]string, 0, len(spec.Env))
+		for k, v := range spec.Env {
+			env = append(env, k+"="+v)
+		}
+		cfg.Env = env
+	}
+
+	exposed := nat.PortSet{}
+	bindings := nat.PortMap{}
+	for _, p := range spec.Ports {
+		if p.ContainerPort <= 0 {
+			return nil, nil, fmt.Errorf("port row missing container_port")
+		}
+		proto := strings.ToLower(p.Protocol)
+		if proto == "" {
+			proto = "tcp"
+		}
+		if proto != "tcp" && proto != "udp" {
+			return nil, nil, fmt.Errorf("port protocol must be tcp or udp, got %q", p.Protocol)
+		}
+		port, err := nat.NewPort(proto, fmt.Sprintf("%d", p.ContainerPort))
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid container port %d/%s: %w", p.ContainerPort, proto, err)
+		}
+		exposed[port] = struct{}{}
+		hostPort := ""
+		if p.HostPort > 0 {
+			hostPort = fmt.Sprintf("%d", p.HostPort)
+		}
+		bindings[port] = append(bindings[port], nat.PortBinding{HostPort: hostPort})
+	}
+	cfg.ExposedPorts = exposed
+
+	hostCfg := &container.HostConfig{PortBindings: bindings}
+
+	for _, v := range spec.Volumes {
+		if v.HostPath == "" || v.ContainerPath == "" {
+			return nil, nil, fmt.Errorf("volume row needs both host_path and container_path")
+		}
+		bind := v.HostPath + ":" + v.ContainerPath
+		if v.ReadOnly {
+			bind += ":ro"
+		}
+		hostCfg.Binds = append(hostCfg.Binds, bind)
+	}
+
+	if spec.RestartPolicy != "" {
+		switch spec.RestartPolicy {
+		case "no", "on-failure", "always", "unless-stopped":
+			hostCfg.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyMode(spec.RestartPolicy)}
+		default:
+			return nil, nil, fmt.Errorf("unsupported restart_policy %q", spec.RestartPolicy)
+		}
+	}
+
+	return cfg, hostCfg, nil
 }
 
 // FilterRunning returns only the containers in state "running".

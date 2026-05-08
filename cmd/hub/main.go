@@ -26,6 +26,10 @@ import (
 	"github.com/aperture/aperture/internal/store"
 )
 
+// Version identifies the running binary. Bump alongside changelog entries.
+// Surfaced via /api/system/info and the layout footer.
+const Version = "0.1.0"
+
 func main() {
 	var (
 		listenAddr = flag.String("listen", envOr("APERTURE_LISTEN", ":8080"), "HTTP listen address")
@@ -39,6 +43,9 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	startedAt := time.Now().UTC()
+	log.Info("aperture hub starting", "version", Version, "db", *dbPath, "listen", *listenAddr)
 
 	st, err := store.Open(*dbPath)
 	if err != nil {
@@ -96,7 +103,7 @@ func main() {
 	}
 	srv := &http.Server{
 		Addr:              *listenAddr,
-		Handler:           api.NewServer(h, ev).Router(webFS),
+		Handler:           api.NewServer(h, ev, Version, startedAt).Router(webFS),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

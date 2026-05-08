@@ -32,6 +32,7 @@ type MetricSource interface {
 // expose the same surface over the wire.
 type DockerProvider interface {
 	List(ctx context.Context, all bool) ([]types.Container, error)
+	Create(ctx context.Context, spec types.CreateSpec) (string, error)
 	Start(ctx context.Context, id string) error
 	Stop(ctx context.Context, id string, timeoutSec *int) error
 	Restart(ctx context.Context, id string, timeoutSec *int) error

@@ -101,6 +101,8 @@ tr:hover td { background: var(--bg-elev-2); }
 .grid.cols-2 { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
 
-@import 'uplot/dist/uPlot.min.css';
-
+/* uPlot's stylesheet is imported via JS in the layout (CSS @import is only
+ * valid at the top of a file, and we have rule declarations above; placing
+ * @import here would be silently dropped). The override below comes after
+ * the JS-imported uplot.min.css thanks to source-order in the bundler. */
 .uplot { font-family: inherit; }
