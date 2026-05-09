@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
-	_ "embed"
 	"database/sql"
+	_ "embed"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/aperture/aperture/internal/types"
@@ -30,6 +32,15 @@ func Open(path string) (*Store, error) {
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	// Idempotent migrations for columns added after the initial schema.
+	migrations := []string{
+		`ALTER TABLE alert_rules ADD COLUMN severity TEXT NOT NULL DEFAULT 'warning'`,
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return nil, fmt.Errorf("migration: %w", err)
+		}
 	}
 	return &Store{db: db, path: path}, nil
 }
@@ -176,13 +187,362 @@ func (s *Store) MetricsRange(ctx context.Context, hostID string, since, until ti
 	return out, nil
 }
 
-// PruneMetrics deletes samples older than cutoff.
+// PruneMetrics deletes samples older than cutoff from all metric tables.
 func (s *Store) PruneMetrics(ctx context.Context, cutoff time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM metrics WHERE ts < ?`, cutoff)
-	if err != nil {
-		return 0, err
+	var total int64
+	for _, table := range []string{"metrics", "net_iface_metrics", "disk_mount_metrics", "disk_io_metrics"} {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE ts < ?`, cutoff)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
 	}
-	return res.RowsAffected()
+	return total, nil
+}
+
+// InsertNetIfaces bulk-inserts per-interface byte counters from a sample.
+// Called best-effort from ingestLoop; errors are logged and ignored.
+func (s *Store) InsertNetIfaces(ctx context.Context, m types.MetricSample) error {
+	if len(m.NetIfaces) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO net_iface_metrics (host_id, ts, iface, rx_bytes, tx_bytes)
+		VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, iface := range m.NetIfaces {
+		if _, err := stmt.ExecContext(ctx, m.HostID, m.Timestamp, iface.Name, iface.RxBytes, iface.TxBytes); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// InsertDiskMounts bulk-inserts per-mount usage from a sample.
+func (s *Store) InsertDiskMounts(ctx context.Context, m types.MetricSample) error {
+	if len(m.DiskMounts) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO disk_mount_metrics (host_id, ts, mount, device, fstype, used, total)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, dm := range m.DiskMounts {
+		if _, err := stmt.ExecContext(ctx, m.HostID, m.Timestamp, dm.Mount, dm.Device, dm.FSType, dm.Used, dm.Total); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// InsertDiskIO bulk-inserts per-device I/O counters from a sample.
+func (s *Store) InsertDiskIO(ctx context.Context, m types.MetricSample) error {
+	if len(m.DiskIO) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO disk_io_metrics (host_id, ts, device, read_bytes, write_bytes)
+		VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, d := range m.DiskIO {
+		if _, err := stmt.ExecContext(ctx, m.HostID, m.Timestamp, d.Device, d.ReadBytes, d.WriteBytes); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// NetIfaceRange returns per-interface byte counters for historical charting,
+// downsampled to at most maxPoints timestamp groups.
+func (s *Store) NetIfaceRange(ctx context.Context, hostID string, since, until time.Time, maxPoints int) (*types.NetIfaceHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ts, iface, rx_bytes, tx_bytes
+		FROM net_iface_metrics
+		WHERE host_id = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC, iface ASC`, hostID, since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type ifaceRow struct {
+		ts         time.Time
+		iface      string
+		rx, tx     uint64
+	}
+	var all []ifaceRow
+	for rows.Next() {
+		var r ifaceRow
+		if err := rows.Scan(&r.ts, &r.iface, &r.rx, &r.tx); err != nil {
+			return nil, err
+		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	tsSeen := make(map[time.Time]bool)
+	for _, r := range all {
+		tsSeen[r.ts] = true
+	}
+	tsList := make([]time.Time, 0, len(tsSeen))
+	for t := range tsSeen {
+		tsList = append(tsList, t)
+	}
+	sort.Slice(tsList, func(i, j int) bool { return tsList[i].Before(tsList[j]) })
+
+	stride := 1
+	if maxPoints > 0 && len(tsList) > maxPoints {
+		stride = len(tsList) / maxPoints
+	}
+	kept := make(map[time.Time]bool)
+	for i := 0; i < len(tsList); i += stride {
+		kept[tsList[i]] = true
+	}
+	if len(tsList) > 0 {
+		kept[tsList[len(tsList)-1]] = true
+	}
+
+	tsKept := make([]time.Time, 0, len(kept))
+	for _, t := range tsList {
+		if kept[t] {
+			tsKept = append(tsKept, t)
+		}
+	}
+	tsIndex := make(map[time.Time]int, len(tsKept))
+	for i, t := range tsKept {
+		tsIndex[t] = i
+	}
+
+	out := &types.NetIfaceHistory{
+		Timestamps: []int64{},
+		Ifaces:     map[string]*types.NetIfaceSeries{},
+	}
+	for _, t := range tsKept {
+		out.Timestamps = append(out.Timestamps, t.Unix())
+	}
+	for _, r := range all {
+		if !kept[r.ts] {
+			continue
+		}
+		is, ok := out.Ifaces[r.iface]
+		if !ok {
+			is = &types.NetIfaceSeries{
+				RxBytes: make([]uint64, len(tsKept)),
+				TxBytes: make([]uint64, len(tsKept)),
+			}
+			out.Ifaces[r.iface] = is
+		}
+		idx := tsIndex[r.ts]
+		is.RxBytes[idx] = r.rx
+		is.TxBytes[idx] = r.tx
+	}
+	return out, nil
+}
+
+// DiskMountRange returns per-mount used/total counters for historical charting.
+func (s *Store) DiskMountRange(ctx context.Context, hostID string, since, until time.Time, maxPoints int) (*types.DiskMountHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ts, mount, used, total
+		FROM disk_mount_metrics
+		WHERE host_id = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC, mount ASC`, hostID, since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type mountRow struct {
+		ts            time.Time
+		mount         string
+		used, total   uint64
+	}
+	var all []mountRow
+	for rows.Next() {
+		var r mountRow
+		if err := rows.Scan(&r.ts, &r.mount, &r.used, &r.total); err != nil {
+			return nil, err
+		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Collect unique timestamps.
+	tsSeen := make(map[time.Time]bool)
+	for _, r := range all {
+		tsSeen[r.ts] = true
+	}
+	tsList := make([]time.Time, 0, len(tsSeen))
+	for t := range tsSeen {
+		tsList = append(tsList, t)
+	}
+	sort.Slice(tsList, func(i, j int) bool { return tsList[i].Before(tsList[j]) })
+
+	stride := 1
+	if maxPoints > 0 && len(tsList) > maxPoints {
+		stride = len(tsList) / maxPoints
+	}
+	kept := make(map[time.Time]bool)
+	for i := 0; i < len(tsList); i += stride {
+		kept[tsList[i]] = true
+	}
+	if len(tsList) > 0 {
+		kept[tsList[len(tsList)-1]] = true
+	}
+
+	out := &types.DiskMountHistory{
+		Timestamps: []int64{},
+		Mounts:     map[string]*types.DiskMountSeries{},
+	}
+	// First pass: collect kept timestamps in order.
+	tsKept := make([]time.Time, 0, len(kept))
+	for _, t := range tsList {
+		if kept[t] {
+			tsKept = append(tsKept, t)
+		}
+	}
+	for _, t := range tsKept {
+		out.Timestamps = append(out.Timestamps, t.Unix())
+	}
+	// Build index: ts -> position.
+	tsIndex := make(map[time.Time]int, len(tsKept))
+	for i, t := range tsKept {
+		tsIndex[t] = i
+	}
+	// Second pass: fill series.
+	for _, r := range all {
+		if !kept[r.ts] {
+			continue
+		}
+		ms, ok := out.Mounts[r.mount]
+		if !ok {
+			ms = &types.DiskMountSeries{
+				Used:  make([]uint64, len(tsKept)),
+				Total: make([]uint64, len(tsKept)),
+			}
+			out.Mounts[r.mount] = ms
+		}
+		idx := tsIndex[r.ts]
+		ms.Used[idx] = r.used
+		ms.Total[idx] = r.total
+	}
+	return out, nil
+}
+
+// DiskIORange returns per-device cumulative I/O counters for historical charting.
+func (s *Store) DiskIORange(ctx context.Context, hostID string, since, until time.Time, maxPoints int) (*types.DiskIOHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ts, device, read_bytes, write_bytes
+		FROM disk_io_metrics
+		WHERE host_id = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC, device ASC`, hostID, since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type ioRow struct {
+		ts             time.Time
+		device         string
+		read, write    uint64
+	}
+	var all []ioRow
+	for rows.Next() {
+		var r ioRow
+		if err := rows.Scan(&r.ts, &r.device, &r.read, &r.write); err != nil {
+			return nil, err
+		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	tsSeen := make(map[time.Time]bool)
+	for _, r := range all {
+		tsSeen[r.ts] = true
+	}
+	tsList := make([]time.Time, 0, len(tsSeen))
+	for t := range tsSeen {
+		tsList = append(tsList, t)
+	}
+	sort.Slice(tsList, func(i, j int) bool { return tsList[i].Before(tsList[j]) })
+
+	stride := 1
+	if maxPoints > 0 && len(tsList) > maxPoints {
+		stride = len(tsList) / maxPoints
+	}
+	kept := make(map[time.Time]bool)
+	for i := 0; i < len(tsList); i += stride {
+		kept[tsList[i]] = true
+	}
+	if len(tsList) > 0 {
+		kept[tsList[len(tsList)-1]] = true
+	}
+
+	tsKept := make([]time.Time, 0, len(kept))
+	for _, t := range tsList {
+		if kept[t] {
+			tsKept = append(tsKept, t)
+		}
+	}
+	tsIndex := make(map[time.Time]int, len(tsKept))
+	for i, t := range tsKept {
+		tsIndex[t] = i
+	}
+
+	out := &types.DiskIOHistory{
+		Timestamps: []int64{},
+		Devices:    map[string]*types.DiskIOSeries{},
+	}
+	for _, t := range tsKept {
+		out.Timestamps = append(out.Timestamps, t.Unix())
+	}
+	for _, r := range all {
+		if !kept[r.ts] {
+			continue
+		}
+		ds, ok := out.Devices[r.device]
+		if !ok {
+			ds = &types.DiskIOSeries{
+				ReadBytes:  make([]uint64, len(tsKept)),
+				WriteBytes: make([]uint64, len(tsKept)),
+			}
+			out.Devices[r.device] = ds
+		}
+		idx := tsIndex[r.ts]
+		ds.ReadBytes[idx] = r.read
+		ds.WriteBytes[idx] = r.write
+	}
+	return out, nil
 }
 
 // --- alert rules ---
@@ -195,7 +555,7 @@ func scanAlertRule(rs interface {
 	var r types.AlertRule
 	var hostID sql.NullString
 	var enabled int
-	if err := rs.Scan(&r.ID, &hostID, &r.Metric, &r.Op, &r.Threshold, &r.DurationS, &enabled, &r.CreatedAt); err != nil {
+	if err := rs.Scan(&r.ID, &hostID, &r.Metric, &r.Op, &r.Threshold, &r.DurationS, &enabled, &r.Severity, &r.CreatedAt); err != nil {
 		return r, err
 	}
 	if hostID.Valid {
@@ -203,6 +563,9 @@ func scanAlertRule(rs interface {
 		r.HostID = &s
 	}
 	r.Enabled = enabled != 0
+	if r.Severity == "" {
+		r.Severity = "warning"
+	}
 	return r, nil
 }
 
@@ -213,13 +576,13 @@ func (s *Store) ListAlertRules(ctx context.Context, hostID *string) ([]types.Ale
 	var err error
 	if hostID != nil {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, host_id, metric, op, threshold, duration_s, enabled, created_at
+			SELECT id, host_id, metric, op, threshold, duration_s, enabled, severity, created_at
 			FROM alert_rules
 			WHERE host_id IS NULL OR host_id = ?
 			ORDER BY id`, *hostID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, host_id, metric, op, threshold, duration_s, enabled, created_at
+			SELECT id, host_id, metric, op, threshold, duration_s, enabled, severity, created_at
 			FROM alert_rules ORDER BY id`)
 	}
 	if err != nil {
@@ -261,7 +624,7 @@ func (s *Store) ListEnabledRulesFor(ctx context.Context, hostID string) ([]types
 
 func (s *Store) GetAlertRule(ctx context.Context, id int64) (*types.AlertRule, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, host_id, metric, op, threshold, duration_s, enabled, created_at
+		SELECT id, host_id, metric, op, threshold, duration_s, enabled, severity, created_at
 		FROM alert_rules WHERE id = ?`, id)
 	r, err := scanAlertRule(row)
 	if err == sql.ErrNoRows {
@@ -282,10 +645,13 @@ func (s *Store) CreateAlertRule(ctx context.Context, r types.AlertRule) (int64, 
 	if r.Enabled {
 		enabled = 1
 	}
+	if r.Severity == "" {
+		r.Severity = "warning"
+	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO alert_rules (host_id, metric, op, threshold, duration_s, enabled)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		hostID, r.Metric, r.Op, r.Threshold, r.DurationS, enabled)
+		INSERT INTO alert_rules (host_id, metric, op, threshold, duration_s, enabled, severity)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		hostID, r.Metric, r.Op, r.Threshold, r.DurationS, enabled, r.Severity)
 	if err != nil {
 		return 0, err
 	}
@@ -301,11 +667,14 @@ func (s *Store) UpdateAlertRule(ctx context.Context, r types.AlertRule) error {
 	if r.Enabled {
 		enabled = 1
 	}
+	if r.Severity == "" {
+		r.Severity = "warning"
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE alert_rules
-		SET host_id = ?, metric = ?, op = ?, threshold = ?, duration_s = ?, enabled = ?
+		SET host_id = ?, metric = ?, op = ?, threshold = ?, duration_s = ?, enabled = ?, severity = ?
 		WHERE id = ?`,
-		hostID, r.Metric, r.Op, r.Threshold, r.DurationS, enabled, r.ID)
+		hostID, r.Metric, r.Op, r.Threshold, r.DurationS, enabled, r.Severity, r.ID)
 	return err
 }
 
@@ -375,4 +744,131 @@ func (s *Store) ListAlertEvents(ctx context.Context, f AlertEventFilter) ([]type
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// --- alert channels ---
+
+func scanAlertChannel(rs interface {
+	Scan(dest ...any) error
+}) (types.AlertChannel, error) {
+	var ch types.AlertChannel
+	var enabled, notifyResolve int
+	var cfg string
+	if err := rs.Scan(&ch.ID, &ch.Name, &ch.Type, &cfg, &enabled, &ch.MinSeverity, &notifyResolve, &ch.CreatedAt); err != nil {
+		return ch, err
+	}
+	ch.Config = []byte(cfg)
+	ch.Enabled = enabled != 0
+	ch.NotifyResolve = notifyResolve != 0
+	if ch.MinSeverity == "" {
+		ch.MinSeverity = "info"
+	}
+	return ch, nil
+}
+
+func (s *Store) ListAlertChannels(ctx context.Context) ([]types.AlertChannel, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, type, config, enabled, min_severity, notify_resolve, created_at
+		FROM alert_channels ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.AlertChannel
+	for rows.Next() {
+		ch, err := scanAlertChannel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ch)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListEnabledChannels(ctx context.Context) ([]types.AlertChannel, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, type, config, enabled, min_severity, notify_resolve, created_at
+		FROM alert_channels WHERE enabled = 1 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.AlertChannel
+	for rows.Next() {
+		ch, err := scanAlertChannel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ch)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetAlertChannel(ctx context.Context, id int64) (*types.AlertChannel, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, type, config, enabled, min_severity, notify_resolve, created_at
+		FROM alert_channels WHERE id = ?`, id)
+	ch, err := scanAlertChannel(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
+}
+
+func (s *Store) CreateAlertChannel(ctx context.Context, ch types.AlertChannel) (int64, error) {
+	enabled := 0
+	if ch.Enabled {
+		enabled = 1
+	}
+	notifyResolve := 0
+	if ch.NotifyResolve {
+		notifyResolve = 1
+	}
+	if ch.MinSeverity == "" {
+		ch.MinSeverity = "info"
+	}
+	cfg := ch.Config
+	if len(cfg) == 0 {
+		cfg = []byte("{}")
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO alert_channels (name, type, config, enabled, min_severity, notify_resolve)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		ch.Name, ch.Type, string(cfg), enabled, ch.MinSeverity, notifyResolve)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) UpdateAlertChannel(ctx context.Context, ch types.AlertChannel) error {
+	enabled := 0
+	if ch.Enabled {
+		enabled = 1
+	}
+	notifyResolve := 0
+	if ch.NotifyResolve {
+		notifyResolve = 1
+	}
+	if ch.MinSeverity == "" {
+		ch.MinSeverity = "info"
+	}
+	cfg := ch.Config
+	if len(cfg) == 0 {
+		cfg = []byte("{}")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE alert_channels
+		SET name = ?, type = ?, config = ?, enabled = ?, min_severity = ?, notify_resolve = ?
+		WHERE id = ?`,
+		ch.Name, ch.Type, string(cfg), enabled, ch.MinSeverity, notifyResolve, ch.ID)
+	return err
+}
+
+func (s *Store) DeleteAlertChannel(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM alert_channels WHERE id = ?`, id)
+	return err
 }

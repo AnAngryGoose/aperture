@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aperture/aperture/internal/types"
@@ -21,6 +23,7 @@ import (
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
+	gopsprocess "github.com/shirou/gopsutil/v4/process"
 	"github.com/shirou/gopsutil/v4/sensors"
 )
 
@@ -37,6 +40,11 @@ type Local struct {
 	prevTime    time.Time
 	prevNetIO   map[string]netPrev
 	prevDiskIO  map[string]diskPrev
+
+	// Process cache: reused across ticks so CPUPercent(0) measures elapsed
+	// time since last call rather than since object creation.
+	procMu    sync.Mutex
+	procCache map[int32]*gopsprocess.Process
 }
 
 type netPrev struct{ rx, tx uint64 }
@@ -59,6 +67,7 @@ func NewLocal(interval time.Duration) *Local {
 		DiskPath:   "/",
 		prevNetIO:  make(map[string]netPrev),
 		prevDiskIO: make(map[string]diskPrev),
+		procCache:  make(map[int32]*gopsprocess.Process),
 	}
 }
 
@@ -216,8 +225,97 @@ func (l *Local) sample(ctx context.Context) (types.MetricSample, error) {
 		}
 	}
 
+	// --- Process list (live only) ---
+	s.Processes = l.processes(ctx)
+
 	l.prevTime = now
 	return s, nil
+}
+
+const maxTopProc = 20
+
+// processes returns the top processes by CPU ∪ top processes by RSS memory.
+// Process objects are cached across ticks so CPUPercent(0) accumulates
+// correctly — on the first tick a newly-seen process reports 0% CPU.
+func (l *Local) processes(ctx context.Context) []types.ProcessSample {
+	l.procMu.Lock()
+	defer l.procMu.Unlock()
+
+	pids, err := gopsprocess.PidsWithContext(ctx)
+	if err != nil {
+		return nil
+	}
+
+	live := make(map[int32]bool, len(pids))
+	for _, pid := range pids {
+		live[pid] = true
+	}
+	// Evict dead processes from cache.
+	for pid := range l.procCache {
+		if !live[pid] {
+			delete(l.procCache, pid)
+		}
+	}
+	// Add new processes to cache (first CPU call establishes baseline).
+	for _, pid := range pids {
+		if _, ok := l.procCache[pid]; !ok {
+			if p, err := gopsprocess.NewProcessWithContext(ctx, pid); err == nil {
+				l.procCache[pid] = p
+			}
+		}
+	}
+
+	var all []types.ProcessSample
+	for _, p := range l.procCache {
+		name, err := p.NameWithContext(ctx)
+		if err != nil {
+			continue
+		}
+		cpuPct, err := p.CPUPercentWithContext(ctx)
+		if err != nil {
+			continue
+		}
+		memInfo, err := p.MemoryInfoWithContext(ctx)
+		if err != nil {
+			continue
+		}
+		memPct, _ := p.MemoryPercentWithContext(ctx)
+		all = append(all, types.ProcessSample{
+			PID:    p.Pid,
+			Name:   name,
+			CPUPct: cpuPct,
+			MemPct: float64(memPct),
+			MemRSS: memInfo.RSS,
+		})
+	}
+
+	// Union of top N by CPU and top N by RSS.
+	byCPU := append([]types.ProcessSample(nil), all...)
+	sort.Slice(byCPU, func(i, j int) bool { return byCPU[i].CPUPct > byCPU[j].CPUPct })
+	byMem := append([]types.ProcessSample(nil), all...)
+	sort.Slice(byMem, func(i, j int) bool { return byMem[i].MemRSS > byMem[j].MemRSS })
+
+	seen := make(map[int32]bool)
+	var result []types.ProcessSample
+	for _, s := range byCPU {
+		if len(result) >= maxTopProc {
+			break
+		}
+		if !seen[s.PID] {
+			seen[s.PID] = true
+			result = append(result, s)
+		}
+	}
+	for _, s := range byMem {
+		if len(result) >= maxTopProc*2 {
+			break
+		}
+		if !seen[s.PID] {
+			seen[s.PID] = true
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // diskMounts returns real (non-pseudo) mounted filesystems with their usage.

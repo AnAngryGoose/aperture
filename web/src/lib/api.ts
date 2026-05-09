@@ -5,10 +5,14 @@ import type {
 	ContainerInspect,
 	ResourceUpdate,
 	AlertRule,
+	AlertChannel,
 	AlertEvent,
 	AlertMetadata,
 	CreateSpec,
-	SystemInfo
+	SystemInfo,
+	NetIfaceHistory,
+	DiskMountHistory,
+	DiskIOHistory
 } from './types';
 
 // In dev, the SvelteKit dev server runs on :5173 and the Go hub on :8080.
@@ -63,6 +67,12 @@ export const api = {
 	latest: (id: string) => get<MetricSample | null>(`/api/hosts/${id}/metrics/latest`),
 	metrics: (id: string, range = '1h', points = 300) =>
 		get<MetricSample[]>(`/api/hosts/${id}/metrics?range=${range}&points=${points}`),
+	netHistory: (id: string, range = '1h', points = 300) =>
+		get<NetIfaceHistory>(`/api/hosts/${id}/metrics/net?range=${range}&points=${points}`),
+	diskMountHistory: (id: string, range = '1h', points = 300) =>
+		get<DiskMountHistory>(`/api/hosts/${id}/metrics/mounts?range=${range}&points=${points}`),
+	diskIOHistory: (id: string, range = '1h', points = 300) =>
+		get<DiskIOHistory>(`/api/hosts/${id}/metrics/diskio?range=${range}&points=${points}`),
 	containers: (id: string, all = true) =>
 		get<Container[]>(`/api/hosts/${id}/containers?all=${all}`),
 	createContainer: (hostID: string, spec: CreateSpec) =>
@@ -99,5 +109,14 @@ export const api = {
 		if (params.limit) q.set('limit', String(params.limit));
 		const qs = q.toString();
 		return get<AlertEvent[]>(`/api/alerts/events${qs ? `?${qs}` : ''}`);
-	}
+	},
+
+	alertChannels: () => get<AlertChannel[]>('/api/alerts/channels'),
+	createAlertChannel: (ch: Partial<AlertChannel>) =>
+		send<AlertChannel>('/api/alerts/channels', 'POST', ch),
+	updateAlertChannel: (id: number, ch: Partial<AlertChannel>) =>
+		send<AlertChannel>(`/api/alerts/channels/${id}`, 'PUT', ch),
+	deleteAlertChannel: (id: number) => del(`/api/alerts/channels/${id}`),
+	testAlertChannel: (id: number) =>
+		send<{ ok: boolean }>(`/api/alerts/channels/${id}/test`, 'POST', {})
 };

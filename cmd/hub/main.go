@@ -28,7 +28,7 @@ import (
 
 // Version identifies the running binary. Bump alongside changelog entries.
 // Surfaced via /api/system/info and the layout footer.
-const Version = "0.1.0"
+const Version = "0.2.0-alpha.2"
 
 func main() {
 	var (
@@ -65,6 +65,9 @@ func main() {
 		os.Exit(1)
 	}
 	h.SetEvaluator(ev)
+
+	notif := alerts.NewNotifier(st, log)
+	ev.SetNotifier(notif)
 
 	go func() {
 		if err := h.Run(ctx); err != nil {
@@ -103,7 +106,7 @@ func main() {
 	}
 	srv := &http.Server{
 		Addr:              *listenAddr,
-		Handler:           api.NewServer(h, ev, Version, startedAt).Router(webFS),
+		Handler:           api.NewServer(h, ev, notif, Version, startedAt).Router(webFS),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

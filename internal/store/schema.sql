@@ -50,7 +50,19 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     threshold    REAL NOT NULL,
     duration_s   INTEGER NOT NULL DEFAULT 0, -- sustained for N seconds before firing
     enabled      INTEGER NOT NULL DEFAULT 1,
+    severity     TEXT NOT NULL DEFAULT 'warning', -- 'info'|'warning'|'critical'
     created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS alert_channels (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL,
+    type           TEXT NOT NULL,                   -- 'discord'|'slack'|'ntfy'|'gotify'|'webhook'
+    config         TEXT NOT NULL DEFAULT '{}',      -- JSON, type-specific fields
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    min_severity   TEXT NOT NULL DEFAULT 'info',    -- minimum severity to notify
+    notify_resolve INTEGER NOT NULL DEFAULT 1,      -- send a message when alert resolves
+    created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS alert_events (
@@ -63,3 +75,41 @@ CREATE TABLE IF NOT EXISTS alert_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_host ON alert_events(host_id, fired_at DESC);
+
+-- Per-interface network counters. Stored alongside the aggregate net_rx/net_tx
+-- so the UI can chart per-interface rates over time. Rates are derived client-side
+-- from consecutive cumulative byte deltas (same pattern as the aggregate chart).
+CREATE TABLE IF NOT EXISTS net_iface_metrics (
+    host_id   TEXT    NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ts        TIMESTAMP NOT NULL,
+    iface     TEXT    NOT NULL,
+    rx_bytes  INTEGER NOT NULL DEFAULT 0,
+    tx_bytes  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (host_id, ts, iface)
+);
+CREATE INDEX IF NOT EXISTS idx_net_iface_metrics_host_ts ON net_iface_metrics(host_id, ts DESC);
+
+-- Per-mount disk usage. Used + total stored so the UI can show both a usage
+-- percentage chart and absolute GB over time per mount.
+CREATE TABLE IF NOT EXISTS disk_mount_metrics (
+    host_id  TEXT    NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ts       TIMESTAMP NOT NULL,
+    mount    TEXT    NOT NULL,
+    device   TEXT    NOT NULL DEFAULT '',
+    fstype   TEXT    NOT NULL DEFAULT '',
+    used     INTEGER NOT NULL DEFAULT 0,
+    total    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (host_id, ts, mount)
+);
+CREATE INDEX IF NOT EXISTS idx_disk_mount_metrics_host_ts ON disk_mount_metrics(host_id, ts DESC);
+
+-- Per-device disk I/O counters. Cumulative bytes, rates derived client-side.
+CREATE TABLE IF NOT EXISTS disk_io_metrics (
+    host_id     TEXT    NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ts          TIMESTAMP NOT NULL,
+    device      TEXT    NOT NULL,
+    read_bytes  INTEGER NOT NULL DEFAULT 0,
+    write_bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (host_id, ts, device)
+);
+CREATE INDEX IF NOT EXISTS idx_disk_io_metrics_host_ts ON disk_io_metrics(host_id, ts DESC);

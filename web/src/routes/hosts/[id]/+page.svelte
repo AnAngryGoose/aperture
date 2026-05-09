@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
-	import type { Host, MetricSample } from '$lib/types';
+	import type { Host, MetricSample, NetIfaceHistory, DiskMountHistory, DiskIOHistory } from '$lib/types';
 	import Bar from '$lib/Bar.svelte';
 	import Chart from '$lib/Chart.svelte';
 	import { formatBytes, formatPct, formatDuration, relTime } from '$lib/format';
@@ -11,20 +11,30 @@
 	let host = $state<Host | null>(null);
 	let samples = $state<MetricSample[]>([]);
 	let latest = $state<MetricSample | null>(null);
+	let netH = $state<NetIfaceHistory | null>(null);
+	let mountH = $state<DiskMountHistory | null>(null);
+	let diskIOH = $state<DiskIOHistory | null>(null);
 	let range = $state<'15m' | '1h' | '6h' | '24h'>('1h');
 	let error = $state<string | null>(null);
+	let procSort = $state<'cpu' | 'mem'>('cpu');
 	let timer: ReturnType<typeof setInterval> | null = null;
 
 	async function load() {
 		try {
-			const [h, ms, lv] = await Promise.all([
+			const [h, ms, lv, nh, mh, dh] = await Promise.all([
 				api.host(id),
 				api.metrics(id, range, 300),
-				api.latest(id)
+				api.latest(id),
+				api.netHistory(id, range, 300),
+				api.diskMountHistory(id, range, 300),
+				api.diskIOHistory(id, range, 300)
 			]);
 			host = h;
 			samples = ms;
 			latest = lv;
+			netH = nh;
+			mountH = mh;
+			diskIOH = dh;
 			error = null;
 		} catch (e) {
 			error = (e as Error).message;
@@ -44,7 +54,7 @@
 		if (timer) clearInterval(timer);
 	});
 
-	// --- Chart data derivations ---
+	// --- Aggregate chart derivations ---
 	let xs = $derived(samples.map((s) => Math.floor(new Date(s.timestamp).getTime() / 1000)));
 
 	let netRx = $derived(
@@ -66,6 +76,77 @@
 		})
 	);
 
+	// --- Per-interface history chart data ---
+	function deriveRates(timestamps: number[], bytes: number[]): number[] {
+		return bytes.map((b, i) => {
+			if (i === 0) return 0;
+			const dt = timestamps[i] - timestamps[i - 1];
+			if (dt <= 0) return 0;
+			return Math.max(0, (b - bytes[i - 1]) / dt);
+		});
+	}
+
+	let ifaceCharts = $derived(
+		Object.entries(netH?.ifaces ?? {})
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([name, series]) => ({
+				name,
+				x: netH!.timestamps,
+				rxRates: deriveRates(netH!.timestamps, series.rx_bytes),
+				txRates: deriveRates(netH!.timestamps, series.tx_bytes)
+			}))
+	);
+
+	let mountCharts = $derived(
+		Object.entries(mountH?.mounts ?? {})
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([mount, series]) => ({
+				mount,
+				x: mountH!.timestamps,
+				usedGiB: series.used.map((v) => v / 1073741824),
+				totalGiB: series.total.map((v) => v / 1073741824)
+			}))
+	);
+
+	// All devices in one chart with distinct colors per device pair
+	const devColors = ['#5cc8ff', '#7ce38b', '#ffcb6b', '#c792ea', '#ff6b6b'];
+	let diskIOSeries = $derived(() => {
+		if (!diskIOH || !diskIOH.timestamps.length) return { x: [] as number[], series: [] as { label: string; values: number[]; stroke?: string }[] };
+		const x = diskIOH.timestamps;
+		const series: { label: string; values: number[]; stroke?: string }[] = [];
+		Object.entries(diskIOH.devices)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.forEach(([device, s], i) => {
+				const col = devColors[i % devColors.length];
+				series.push({ label: `${device} read`, values: deriveRates(x, s.read_bytes), stroke: col });
+				series.push({ label: `${device} write`, values: deriveRates(x, s.write_bytes), stroke: col + '99' });
+			});
+		return { x, series };
+	});
+
+	// --- Process list ---
+	let sortedProcs = $derived(
+		(latest?.processes ?? []).slice().sort((a, b) =>
+			procSort === 'cpu' ? b.cpu_pct - a.cpu_pct : b.mem_rss - a.mem_rss
+		)
+	);
+
+	// --- Memory breakdown ---
+	let memBreakdown = $derived(() => {
+		if (!latest) return null;
+		const total = latest.mem_total;
+		if (!total) return null;
+		const used = latest.mem_used;
+		const cached = latest.mem_cached ?? 0;
+		const free = Math.max(0, total - used - cached);
+		return {
+			usedPct: (used / total) * 100,
+			cachedPct: (cached / total) * 100,
+			freePct: (free / total) * 100,
+			used, cached, free, total
+		};
+	});
+
 	// Formatters for chart Y-axes.
 	function fmtGiB(bytes: number): string {
 		const gib = bytes / 1073741824;
@@ -76,11 +157,16 @@
 		if (bps < 1048576) return `${(bps / 1024).toFixed(1)} KiB/s`;
 		return `${(bps / 1048576).toFixed(1)} MiB/s`;
 	}
-
-	// Human-friendly rate for table cells.
 	function rateStr(bps: number): string {
 		if (bps <= 0) return '0 B/s';
 		return fmtBytesRate(bps);
+	}
+	function fmtRSS(bytes: number): string {
+		const gib = bytes / 1073741824;
+		if (gib >= 1) return `${gib.toFixed(2)} GiB`;
+		const mib = bytes / 1048576;
+		if (mib >= 1) return `${mib.toFixed(1)} MiB`;
+		return `${(bytes / 1024).toFixed(0)} KiB`;
 	}
 </script>
 
@@ -131,11 +217,25 @@
 		</div>
 		<div class="card stat">
 			<div class="label">Memory</div>
-			<div class="big">{formatBytes(latest.mem_used)}</div>
-			<Bar value={latest.mem_percent} />
-			<div class="muted mono small">{formatBytes(latest.mem_used)} / {formatBytes(latest.mem_total)} · {formatPct(latest.mem_percent)}</div>
-			{#if latest.mem_avail}
-				<div class="muted mono small">avail {formatBytes(latest.mem_avail)}{#if latest.mem_cached} · cached {formatBytes(latest.mem_cached)}{/if}</div>
+			{#if memBreakdown()}
+				{@const mb = memBreakdown()!}
+				<div class="big">{formatBytes(mb.used)}</div>
+				<div class="mem-seg-bar">
+					<div class="seg seg-used" style="width:{mb.usedPct}%"></div>
+					<div class="seg seg-cached" style="width:{mb.cachedPct}%"></div>
+					<div class="seg seg-free" style="width:{mb.freePct}%"></div>
+				</div>
+				<div class="muted mono small">{formatBytes(mb.used)} / {formatBytes(mb.total)} · {formatPct(latest.mem_percent)}</div>
+				{#if mb.cached > 0}
+					<div class="muted mono small">
+						<span class="dot-cached">●</span> cached {formatBytes(mb.cached)}
+						<span class="dot-free" style="margin-left:6px">●</span> free {formatBytes(mb.free)}
+					</div>
+				{/if}
+			{:else}
+				<div class="big">{formatBytes(latest.mem_used)}</div>
+				<Bar value={latest.mem_percent} />
+				<div class="muted mono small">{formatBytes(latest.mem_used)} / {formatBytes(latest.mem_total)} · {formatPct(latest.mem_percent)}</div>
 			{/if}
 			{#if latest.swap_total > 0}
 				<div class="muted mono small">swap {formatBytes(latest.swap_used)} / {formatBytes(latest.swap_total)}</div>
@@ -177,7 +277,7 @@
 	<!-- ── Network interfaces ─────────────────────────────────────── -->
 	{#if latest.net_interfaces && latest.net_interfaces.length > 0}
 		<div class="card section">
-			<div class="section-title">Network interfaces</div>
+			<div class="section-title">Network interfaces — live</div>
 			<table>
 				<thead>
 					<tr>
@@ -206,7 +306,7 @@
 	<!-- ── Disk mounts ────────────────────────────────────────────── -->
 	{#if latest.disk_mounts && latest.disk_mounts.length > 0}
 		<div class="card section">
-			<div class="section-title">Disk mounts</div>
+			<div class="section-title">Disk mounts — live</div>
 			<table>
 				<thead>
 					<tr>
@@ -242,7 +342,7 @@
 	<!-- ── Disk I/O ───────────────────────────────────────────────── -->
 	{#if latest.disk_io && latest.disk_io.length > 0}
 		<div class="card section">
-			<div class="section-title">Disk I/O</div>
+			<div class="section-title">Disk I/O — live</div>
 			<table>
 				<thead>
 					<tr>
@@ -284,52 +384,128 @@
 			</div>
 		</div>
 	{/if}
+
+	<!-- ── Processes ─────────────────────────────────────────────── -->
+	{#if latest.processes && latest.processes.length > 0}
+		<div class="card section">
+			<div class="section-title-row">
+				<span class="section-title">Processes — live</span>
+				<div class="sort-pills">
+					<button class:active={procSort === 'cpu'} onclick={() => (procSort = 'cpu')}>CPU</button>
+					<button class:active={procSort === 'mem'} onclick={() => (procSort = 'mem')}>Memory</button>
+				</div>
+			</div>
+			<table>
+				<thead>
+					<tr>
+						<th>Name</th>
+						<th>PID</th>
+						<th>CPU%</th>
+						<th>Mem%</th>
+						<th>RSS</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each sortedProcs as p}
+						<tr>
+							<td class="mono">{p.name}</td>
+							<td class="mono muted small">{p.pid}</td>
+							<td class="mono {p.cpu_pct >= 50 ? 'bad' : p.cpu_pct >= 20 ? 'warn' : 'accent'}">{p.cpu_pct.toFixed(1)}%</td>
+							<td class="mono muted">{p.mem_pct.toFixed(1)}%</td>
+							<td class="mono muted">{fmtRSS(p.mem_rss)}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+	{/if}
 {/if}
 
 <!-- ── Historical charts ──────────────────────────────────────────── -->
 {#if samples.length > 1}
 	<div class="charts-header muted small">Historical — {range} window</div>
-	<div class="card chart-card">
-		<div class="chart-title">CPU usage</div>
-		<Chart x={xs} series={[{ label: 'CPU %', values: samples.map((s) => s.cpu_percent) }]} valueSuffix="%" yMin={0} yMax={100} />
-	</div>
-	<div class="card chart-card">
-		<div class="chart-title">Memory usage</div>
-		<Chart
-			x={xs}
-			series={[
+	<div class="chart-grid">
+		<div class="card chart-card">
+			<div class="chart-title">CPU usage</div>
+			<Chart x={xs} series={[{ label: 'CPU %', values: samples.map((s) => s.cpu_percent) }]}
+				valueSuffix="%" yMin={0} yMax={100} />
+		</div>
+		<div class="card chart-card">
+			<div class="chart-title">Memory usage</div>
+			<Chart x={xs} series={[
 				{ label: 'Used', values: samples.map((s) => s.mem_used), stroke: '#7ce38b' },
-				{ label: 'Total', values: samples.map((s) => s.mem_total), stroke: '#232a3d' }
-			]}
-			valueFormatter={fmtGiB}
-		/>
-	</div>
-	<div class="card chart-card">
-		<div class="chart-title">Disk usage (/)</div>
-		<Chart
-			x={xs}
-			series={[
+				{ label: 'Total', values: samples.map((s) => s.mem_total), stroke: '#3a4258', fill: false }
+			]} valueFormatter={fmtGiB} />
+		</div>
+		<div class="card chart-card">
+			<div class="chart-title">Disk usage (/)</div>
+			<Chart x={xs} series={[
 				{ label: 'Used', values: samples.map((s) => s.disk_used), stroke: '#ffcb6b' },
-				{ label: 'Total', values: samples.map((s) => s.disk_total), stroke: '#232a3d' }
-			]}
-			valueFormatter={fmtGiB}
-		/>
+				{ label: 'Total', values: samples.map((s) => s.disk_total), stroke: '#3a4258', fill: false }
+			]} valueFormatter={fmtGiB} />
+		</div>
+		<div class="card chart-card">
+			<div class="chart-title">Network throughput (aggregate)</div>
+			<Chart x={xs} series={[
+				{ label: 'Rx', values: netRx, stroke: '#5cc8ff' },
+				{ label: 'Tx', values: netTx, stroke: '#c792ea' }
+			]} valueFormatter={fmtBytesRate} />
+		</div>
+		<div class="card chart-card span-full">
+			<div class="chart-title">Load average</div>
+			<Chart x={xs} series={[
+				{ label: '1m',  values: samples.map((s) => s.load_avg_1), stroke: '#5cc8ff' },
+				{ label: '5m',  values: samples.map((s) => s.load_avg_5), stroke: '#7ce38b' },
+				{ label: '15m', values: samples.map((s) => s.load_avg_15), stroke: '#ffcb6b' }
+			]} />
+		</div>
 	</div>
-	<div class="card chart-card">
-		<div class="chart-title">Network throughput</div>
-		<Chart x={xs} series={[
-			{ label: 'Rx', values: netRx, stroke: '#5cc8ff' },
-			{ label: 'Tx', values: netTx, stroke: '#c792ea' }
-		]} valueFormatter={fmtBytesRate} />
-	</div>
-	<div class="card chart-card">
-		<div class="chart-title">Load average</div>
-		<Chart x={xs} series={[
-			{ label: '1m', values: samples.map((s) => s.load_avg_1) },
-			{ label: '5m', values: samples.map((s) => s.load_avg_5), stroke: '#7ce38b' },
-			{ label: '15m', values: samples.map((s) => s.load_avg_15), stroke: '#ffcb6b' }
-		]} />
-	</div>
+
+	<!-- ── Per-interface network history ─────────────────────────── -->
+	{#if ifaceCharts.length > 0}
+		<div class="charts-header muted small">Network — per interface</div>
+		<div class="chart-grid">
+			{#each ifaceCharts as ifc}
+				{#if ifc.x.length > 1}
+					<div class="card chart-card">
+						<div class="chart-title">{ifc.name}</div>
+						<Chart x={ifc.x} series={[
+							{ label: 'RX', values: ifc.rxRates, stroke: '#5cc8ff' },
+							{ label: 'TX', values: ifc.txRates, stroke: '#c792ea' }
+						]} valueFormatter={fmtBytesRate} />
+					</div>
+				{/if}
+			{/each}
+		</div>
+	{/if}
+
+	<!-- ── Per-mount disk history ─────────────────────────────────── -->
+	{#if mountCharts.length > 0}
+		<div class="charts-header muted small">Disk — per mount</div>
+		<div class="chart-grid">
+			{#each mountCharts as mc}
+				{#if mc.x.length > 1}
+					<div class="card chart-card">
+						<div class="chart-title">{mc.mount}</div>
+						<Chart x={mc.x} series={[
+							{ label: 'Used',  values: mc.usedGiB,  stroke: '#ffcb6b' },
+							{ label: 'Total', values: mc.totalGiB, stroke: '#3a4258', fill: false }
+						]} valueFormatter={fmtGiB} />
+					</div>
+				{/if}
+			{/each}
+		</div>
+	{/if}
+
+	<!-- ── Disk I/O history ───────────────────────────────────────── -->
+	{@const diskIO = diskIOSeries()}
+	{#if diskIO.x.length > 1 && diskIO.series.length > 0}
+		<div class="charts-header muted small">Disk I/O — per device</div>
+		<div class="card chart-card">
+			<div class="chart-title">Read / Write rates</div>
+			<Chart x={diskIO.x} series={diskIO.series} valueFormatter={fmtBytesRate} />
+		</div>
+	{/if}
 {:else if !error}
 	<div class="card muted">Collecting samples… charts will appear once at least 2 are available.</div>
 {/if}
@@ -377,6 +553,21 @@
 	.label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
 	.big { font-size: 22px; font-weight: 600; font-family: var(--mono); }
 
+	/* Memory segmented bar */
+	.mem-seg-bar {
+		display: flex;
+		height: 6px;
+		border-radius: 3px;
+		overflow: hidden;
+		background: var(--bg-elev-2);
+	}
+	.seg { height: 100%; transition: width 0.4s ease; }
+	.seg-used { background: var(--accent); }
+	.seg-cached { background: #5cc8ff66; }
+	.seg-free { background: transparent; }
+	.dot-cached { color: #5cc8ff66; }
+	.dot-free { color: var(--bg-elev-2); }
+
 	/* Section cards */
 	.section { margin-top: 16px; }
 	.section-title {
@@ -386,6 +577,20 @@
 		letter-spacing: 0.06em;
 		color: var(--text-dim);
 		margin-bottom: 12px;
+	}
+	.section-title-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 12px;
+	}
+	.section-title-row .section-title { margin-bottom: 0; }
+	.sort-pills { display: flex; gap: 4px; }
+	.sort-pills button { font-size: 11px; padding: 2px 8px; }
+	.sort-pills button.active {
+		background: var(--bg-elev);
+		border-color: var(--accent);
+		color: var(--accent);
 	}
 
 	/* Per-core CPU grid */
@@ -437,7 +642,17 @@
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
 	}
+	/* 2-column responsive grid for all chart sections */
+	.chart-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+		gap: 12px;
+		margin-top: 12px;
+	}
+	.chart-grid .chart-card { margin-top: 0; }
+	/* Load avg and I/O charts span the full width when in a grid */
+	.chart-grid .span-full { grid-column: 1 / -1; }
 	.chart-card { margin-top: 12px; }
-	.chart-title { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+	.chart-title { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; font-weight: 500; }
 	.err { color: var(--bad); border-color: var(--bad); }
 </style>

@@ -26,6 +26,7 @@ import (
 type Server struct {
 	hub       *hub.Hub
 	evaluator *alerts.Evaluator
+	notifier  *alerts.Notifier
 	version   string
 	startedAt time.Time
 }
@@ -34,8 +35,8 @@ type Server struct {
 // /api/system/info; the store's path is read directly from h.Store().Path()
 // at request time so a future runtime DB swap (not currently supported)
 // would Just Work.
-func NewServer(h *hub.Hub, ev *alerts.Evaluator, version string, startedAt time.Time) *Server {
-	return &Server{hub: h, evaluator: ev, version: version, startedAt: startedAt}
+func NewServer(h *hub.Hub, ev *alerts.Evaluator, notifier *alerts.Notifier, version string, startedAt time.Time) *Server {
+	return &Server{hub: h, evaluator: ev, notifier: notifier, version: version, startedAt: startedAt}
 }
 
 // Router builds the chi router. webFS may be nil during early development
@@ -55,6 +56,9 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Get("/hosts", s.listHosts)
 		r.Get("/hosts/{id}", s.getHost)
 		r.Get("/hosts/{id}/metrics/latest", s.latestMetric)
+		r.Get("/hosts/{id}/metrics/net", s.netIfaceHistory)
+		r.Get("/hosts/{id}/metrics/mounts", s.diskMountHistory)
+		r.Get("/hosts/{id}/metrics/diskio", s.diskIOHistory)
 		r.Get("/hosts/{id}/metrics", s.metricsRange)
 		r.Get("/hosts/{id}/containers", s.listContainers)
 		r.Post("/hosts/{id}/containers", s.containerCreate)
@@ -74,6 +78,12 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Put("/alerts/rules/{id}", s.updateAlertRule)
 		r.Delete("/alerts/rules/{id}", s.deleteAlertRule)
 		r.Get("/alerts/events", s.listAlertEvents)
+		r.Get("/alerts/channels", s.listAlertChannels)
+		r.Post("/alerts/channels", s.createAlertChannel)
+		r.Get("/alerts/channels/{id}", s.getAlertChannel)
+		r.Put("/alerts/channels/{id}", s.updateAlertChannel)
+		r.Delete("/alerts/channels/{id}", s.deleteAlertChannel)
+		r.Post("/alerts/channels/{id}/test", s.testAlertChannel)
 	})
 
 	if webFS != nil {
@@ -198,6 +208,66 @@ func (s *Server) metricsRange(w http.ResponseWriter, r *http.Request) {
 		ms = []types.MetricSample{}
 	}
 	writeJSON(w, http.StatusOK, ms)
+}
+
+func (s *Server) netIfaceHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	dur := parseDuration(r.URL.Query().Get("range"), time.Hour)
+	until := time.Now().UTC()
+	since := until.Add(-dur)
+	pts, _ := strconv.Atoi(r.URL.Query().Get("points"))
+	if pts == 0 {
+		pts = 300
+	}
+	h, err := s.hub.Store().NetIfaceRange(r.Context(), id, since, until, pts)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if h == nil {
+		h = &types.NetIfaceHistory{Timestamps: []int64{}, Ifaces: map[string]*types.NetIfaceSeries{}}
+	}
+	writeJSON(w, http.StatusOK, h)
+}
+
+func (s *Server) diskMountHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	dur := parseDuration(r.URL.Query().Get("range"), time.Hour)
+	until := time.Now().UTC()
+	since := until.Add(-dur)
+	pts, _ := strconv.Atoi(r.URL.Query().Get("points"))
+	if pts == 0 {
+		pts = 300
+	}
+	h, err := s.hub.Store().DiskMountRange(r.Context(), id, since, until, pts)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if h == nil {
+		h = &types.DiskMountHistory{Timestamps: []int64{}, Mounts: map[string]*types.DiskMountSeries{}}
+	}
+	writeJSON(w, http.StatusOK, h)
+}
+
+func (s *Server) diskIOHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	dur := parseDuration(r.URL.Query().Get("range"), time.Hour)
+	until := time.Now().UTC()
+	since := until.Add(-dur)
+	pts, _ := strconv.Atoi(r.URL.Query().Get("points"))
+	if pts == 0 {
+		pts = 300
+	}
+	h, err := s.hub.Store().DiskIORange(r.Context(), id, since, until, pts)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if h == nil {
+		h = &types.DiskIOHistory{Timestamps: []int64{}, Devices: map[string]*types.DiskIOSeries{}}
+	}
+	writeJSON(w, http.StatusOK, h)
 }
 
 func (s *Server) listContainers(w http.ResponseWriter, r *http.Request) {
@@ -442,8 +512,10 @@ func (s *Server) containerLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) alertsMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"metrics": alerts.SupportedMetrics,
-		"ops":     alerts.SupportedOps,
+		"metrics":       alerts.SupportedMetrics,
+		"ops":           alerts.SupportedOps,
+		"severities":    []string{"info", "warning", "critical"},
+		"channel_types": []string{"discord", "slack", "ntfy", "gotify", "webhook"},
 	})
 }
 
@@ -473,6 +545,7 @@ type alertRulePayload struct {
 	Threshold float64 `json:"threshold"`
 	DurationS int     `json:"duration_s"`
 	Enabled   *bool   `json:"enabled"`
+	Severity  string  `json:"severity"`
 }
 
 func (p alertRulePayload) toRule(id int64) types.AlertRule {
@@ -483,6 +556,10 @@ func (p alertRulePayload) toRule(id int64) types.AlertRule {
 		Threshold: p.Threshold,
 		DurationS: p.DurationS,
 		Enabled:   true,
+		Severity:  p.Severity,
+	}
+	if r.Severity == "" {
+		r.Severity = "warning"
 	}
 	if p.HostID != "" {
 		hid := p.HostID
@@ -602,6 +679,181 @@ func (s *Server) listAlertEvents(w http.ResponseWriter, r *http.Request) {
 		events = []types.AlertEvent{}
 	}
 	writeJSON(w, http.StatusOK, events)
+}
+
+// --- alert channels ---
+
+type alertChannelPayload struct {
+	Name          string          `json:"name"`
+	Type          string          `json:"type"`
+	Config        json.RawMessage `json:"config"`
+	Enabled       *bool           `json:"enabled"`
+	MinSeverity   string          `json:"min_severity"`
+	NotifyResolve *bool           `json:"notify_resolve"`
+}
+
+func (p alertChannelPayload) toChannel(id int64) types.AlertChannel {
+	ch := types.AlertChannel{
+		ID:            id,
+		Name:          p.Name,
+		Type:          p.Type,
+		Config:        []byte(p.Config),
+		Enabled:       true,
+		MinSeverity:   p.MinSeverity,
+		NotifyResolve: true,
+	}
+	if len(ch.Config) == 0 {
+		ch.Config = []byte("{}")
+	}
+	if ch.MinSeverity == "" {
+		ch.MinSeverity = "info"
+	}
+	if p.Enabled != nil {
+		ch.Enabled = *p.Enabled
+	}
+	if p.NotifyResolve != nil {
+		ch.NotifyResolve = *p.NotifyResolve
+	}
+	return ch
+}
+
+func validateChannelType(t string) error {
+	for _, v := range []string{"discord", "slack", "ntfy", "gotify", "webhook"} {
+		if t == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown channel type %q", t)
+}
+
+func (s *Server) listAlertChannels(w http.ResponseWriter, r *http.Request) {
+	channels, err := s.hub.Store().ListAlertChannels(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if channels == nil {
+		channels = []types.AlertChannel{}
+	}
+	writeJSON(w, http.StatusOK, channels)
+}
+
+func (s *Server) createAlertChannel(w http.ResponseWriter, r *http.Request) {
+	var p alertChannelPayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateChannelType(p.Type); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ch := p.toChannel(0)
+	id, err := s.hub.Store().CreateAlertChannel(r.Context(), ch)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	created, err := s.hub.Store().GetAlertChannel(r.Context(), id)
+	if err != nil || created == nil {
+		ch.ID = id
+		writeJSON(w, http.StatusCreated, ch)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) getAlertChannel(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ch, err := s.hub.Store().GetAlertChannel(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if ch == nil {
+		writeErr(w, http.StatusNotFound, errors.New("channel not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, ch)
+}
+
+func (s *Server) updateAlertChannel(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var p alertChannelPayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateChannelType(p.Type); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ch := p.toChannel(id)
+	if err := s.hub.Store().UpdateAlertChannel(r.Context(), ch); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	updated, err := s.hub.Store().GetAlertChannel(r.Context(), id)
+	if err != nil || updated == nil {
+		writeJSON(w, http.StatusOK, ch)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) deleteAlertChannel(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.hub.Store().DeleteAlertChannel(r.Context(), id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) testAlertChannel(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ch, err := s.hub.Store().GetAlertChannel(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if ch == nil {
+		writeErr(w, http.StatusNotFound, errors.New("channel not found"))
+		return
+	}
+	// Build a synthetic notification for testing.
+	now := time.Now().UTC()
+	testNotif := alerts.Notification{
+		Event: types.AlertEvent{ID: 0, RuleID: 0, HostID: "test", FiredAt: now, Value: 75.5},
+		Rule:  types.AlertRule{Metric: "cpu_pct", Op: ">", Threshold: 75, Severity: "warning"},
+		Host:  types.Host{ID: "test", Name: "test-host"},
+	}
+	sender, err := alerts.BuildSender(*ch)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	if err := sender.Send(r.Context(), testNotif); err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // --- helpers ---

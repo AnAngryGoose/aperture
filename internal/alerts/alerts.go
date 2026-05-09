@@ -35,9 +35,10 @@ import (
 // Evaluator runs all enabled rules against incoming samples and persists
 // alert_events transitions (fire / resolve).
 type Evaluator struct {
-	store *store.Store
-	log   *slog.Logger
-	mu    sync.Mutex
+	store    *store.Store
+	log      *slog.Logger
+	notifier *Notifier // nil-safe; set via SetNotifier before Run
+	mu       sync.Mutex
 	// pending tracks the first time a rule's breach condition was observed,
 	// per host. Cleared when the breach ends (resolves) or when the event
 	// fires (moves to "open"). Used to enforce sustained-duration semantics.
@@ -47,6 +48,10 @@ type Evaluator struct {
 	// can resolve events that were open at shutdown.
 	open map[ruleHostKey]int64
 }
+
+// SetNotifier wires in a Notifier so fired/resolved events are dispatched to
+// configured channels. Must be called before the first Evaluate call.
+func (e *Evaluator) SetNotifier(n *Notifier) { e.notifier = n }
 
 type ruleHostKey struct {
 	ruleID int64
@@ -133,6 +138,10 @@ func (e *Evaluator) evalOne(ctx context.Context, r types.AlertRule, sample types
 			}
 			delete(e.open, key)
 			e.log.Info("alert resolved", "rule_id", r.ID, "host_id", sample.HostID, "event_id", id, "value", val)
+			if e.notifier != nil {
+				ev := types.AlertEvent{ID: id, RuleID: r.ID, HostID: sample.HostID, FiredAt: sample.Timestamp, Value: val}
+				go e.notifier.Dispatch(ctx, ev, r, true)
+			}
 		}
 	}
 }
@@ -140,21 +149,26 @@ func (e *Evaluator) evalOne(ctx context.Context, r types.AlertRule, sample types
 // fire records a new alert_event and clears the pending entry. Caller holds
 // e.mu.
 func (e *Evaluator) fire(ctx context.Context, r types.AlertRule, sample types.MetricSample, val float64, key ruleHostKey) {
-	id, err := e.store.InsertAlertEvent(ctx, types.AlertEvent{
+	ev := types.AlertEvent{
 		RuleID:  r.ID,
 		HostID:  sample.HostID,
 		FiredAt: sample.Timestamp,
 		Value:   val,
-	})
+	}
+	id, err := e.store.InsertAlertEvent(ctx, ev)
 	if err != nil {
 		e.log.Error("alerts: insert event", "rule_id", r.ID, "err", err)
 		return
 	}
+	ev.ID = id
 	e.open[key] = id
 	delete(e.pending, key)
 	e.log.Warn("alert fired",
 		"rule_id", r.ID, "host_id", sample.HostID, "event_id", id,
 		"metric", r.Metric, "op", r.Op, "threshold", r.Threshold, "value", val)
+	if e.notifier != nil {
+		go e.notifier.Dispatch(ctx, ev, r, false)
+	}
 }
 
 // HandleRuleDelete drops any in-memory state for a rule that's been deleted.

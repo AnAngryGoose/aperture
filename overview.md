@@ -4,15 +4,16 @@ A single pane of glass for homelab command-and-control. Aperture is a self-hoste
 
 ## What it does (current state)
 
-**v0.2.0-alpha.1** — rich monitoring depth + complete container lifecycle. Monitoring surfaces per-core CPU, per-interface network (rates + totals), per-mount disk usage, per-device disk I/O rates, and hardware temperatures alongside the historical charts. Container management adds full deep-inspect (config, live stats, resource limits, mounts, env, labels), inline resource limit editing (CPU cores, memory GiB), one-click recreate, container sorting and filtering, and per-host sub-navigation. **v0.1.0** established the base monitoring + container management foundation and is documented below for reference.
+**v0.2.0-alpha.3** — chart UX improvements (rich hover tooltip, drag-to-zoom, dynamic Y-axis sizing, 2-column chart grid) and extensible alert notification channels: Discord, Slack, ntfy, Gotify, and generic webhook, each with per-rule severity levels (info/warning/critical), per-channel minimum-severity filtering, and configurable resolve notifications. **v0.2.0-alpha.2** added full Beszel monitoring parity (historical per-interface/mount/IO charts, process list, memory breakdown). **v0.2.0-alpha.1** added rich live monitoring depth and complete container lifecycle. **v0.1.0** established the base foundation.
 
-- Auto-discovers the local host, samples its system metrics every few seconds, and stores them in SQLite. Live snapshot is cached in-memory to carry rich fields (per-core, per-interface, temps) that are not stored historically.
+- Auto-discovers the local host, samples its system metrics every few seconds, and stores them in SQLite. Live snapshot is cached in-memory to carry rich fields (per-core CPU, per-interface network, all disk mounts, disk I/O, temps, process list) that are not stored historically. Three new tables (`net_iface_metrics`, `disk_mount_metrics`, `disk_io_metrics`) store per-entity historical data for charting.
 - Lists all docker containers on the host with live CPU/memory stats.
 - Web dashboard:
   - Host overview cards (CPU, memory, disk, container count) with auto-refresh.
-  - Per-host detail view: stat cards, per-core CPU grid, network interfaces table (rates + totals), disk mounts table (usage bars), disk I/O table, temperature grid, and time-series charts for CPU, memory, disk, network, and load average across 15m / 1h / 6h / 24h.
+  - Per-host detail view: stat cards (CPU %, memory with 3-segment used/cached/free bar, disk, uptime), per-core CPU grid, network interfaces live table (rates + totals), disk mounts live table (usage bars), disk I/O live table, temperature grid, live process table (top 40 by CPU/memory with sort toggle), and time-series charts for CPU, memory, disk, network, and load average across 15m / 1h / 6h / 24h. Historical charts also include per-interface network rates, per-mount disk usage, and disk I/O rates per device.
   - Container management: create (surface form: image, name, restart policy, env, ports, volumes, auto-start), deep-inspect (inline expand with full config + live stats + resource limits + actions), resource limit editing (CPU/memory live update), recreate, start, stop, pause, unpause, restart, kill, remove, view logs. Sorting (name/state/cpu/mem) and state filtering.
-- Threshold-based alerts: configurable rules per host (or all hosts) on cpu/mem/disk/swap/load with optional sustained-breach duration; live event history with auto-resolve when the breach ends; nav badge with currently-firing count.
+- Threshold-based alerts: configurable rules per host (or all hosts) on cpu/mem/disk/swap/load with optional sustained-breach duration; per-rule severity (info/warning/critical); live event history with auto-resolve when the breach ends; nav badge with currently-firing count.
+- Alert notification channels: Discord, Slack, ntfy, Gotify, and generic webhook. Each channel has a minimum-severity filter and a configurable resolve-notify toggle. Channels are configured from the Alerts → Channels tab with a Test button to validate config before it's used in anger.
 
 ## Why it exists
 
@@ -187,8 +188,11 @@ All endpoints live under `/api`. Responses are JSON unless noted.
 | GET | `/api/system/info` | Hub version, started-at timestamp, SQLite DB path, and total on-disk size (`aperture.db` + `-wal` + `-shm`). Used by the layout footer. |
 | GET | `/api/hosts` | List all known hosts. |
 | GET | `/api/hosts/{id}` | Get a single host. |
-| GET | `/api/hosts/{id}/metrics/latest` | Most recent metric sample. |
-| GET | `/api/hosts/{id}/metrics?range=1h&points=300` | Down-sampled samples for the range. |
+| GET | `/api/hosts/{id}/metrics/latest` | Most recent metric sample (includes rich live-only fields: per-core CPU, per-interface network, disk mounts, disk I/O, temps, process list). |
+| GET | `/api/hosts/{id}/metrics?range=1h&points=300` | Down-sampled aggregate samples for the range. |
+| GET | `/api/hosts/{id}/metrics/net?range=1h&points=300` | Historical per-interface rx/tx bytes, pivoted into `{timestamps, ifaces}`. Rates derived client-side. |
+| GET | `/api/hosts/{id}/metrics/mounts?range=1h&points=300` | Historical per-mount used/total bytes, pivoted into `{timestamps, mounts}`. |
+| GET | `/api/hosts/{id}/metrics/diskio?range=1h&points=300` | Historical per-device read/write bytes, pivoted into `{timestamps, devices}`. Rates derived client-side. |
 | GET | `/api/hosts/{id}/containers?all=true` | Containers on the host. |
 | POST | `/api/hosts/{id}/containers` | Create container from a surface-layer spec (image, name, restart policy, env, ports, volumes, auto-start). Pulls image if missing. Returns `{id}` on success, `{id, warning}` (HTTP 202) if the container was created but failed to start. |
 | GET | `/api/hosts/{id}/containers/{cid}/inspect` | Full container detail: config, timestamps, env, ports, mounts, labels, live stats, and resource limits. |

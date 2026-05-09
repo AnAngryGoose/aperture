@@ -47,6 +47,14 @@ export interface TempSample {
 	temp_celsius: number;
 }
 
+export interface ProcessSample {
+	pid: number;
+	name: string;
+	cpu_pct: number;
+	mem_pct: number;
+	mem_rss: number; // bytes
+}
+
 export interface MetricSample {
 	host_id: string;
 	timestamp: string;
@@ -73,7 +81,19 @@ export interface MetricSample {
 	disk_mounts?: DiskMountSample[];
 	disk_io?: DiskIOSample[];
 	temps?: TempSample[];
+	processes?: ProcessSample[];
 }
+
+// Historical rich-metric response types (from /metrics/net, /metrics/mounts, /metrics/diskio)
+
+export interface NetIfaceSeries { rx_bytes: number[]; tx_bytes: number[]; }
+export interface NetIfaceHistory { timestamps: number[]; ifaces: Record<string, NetIfaceSeries>; }
+
+export interface DiskMountSeries { used: number[]; total: number[]; }
+export interface DiskMountHistory { timestamps: number[]; mounts: Record<string, DiskMountSeries>; }
+
+export interface DiskIOSeries { read_bytes: number[]; write_bytes: number[]; }
+export interface DiskIOHistory { timestamps: number[]; devices: Record<string, DiskIOSeries>; }
 
 export interface PortMapping {
 	ip?: string;
@@ -129,6 +149,18 @@ export interface AlertRule {
 	threshold: number;
 	duration_s: number;
 	enabled: boolean;
+	severity: string; // 'info' | 'warning' | 'critical'
+	created_at: string;
+}
+
+export interface AlertChannel {
+	id: number;
+	name: string;
+	type: string; // 'discord' | 'slack' | 'ntfy' | 'gotify' | 'webhook'
+	config: Record<string, unknown>;
+	enabled: boolean;
+	min_severity: string; // 'info' | 'warning' | 'critical'
+	notify_resolve: boolean;
 	created_at: string;
 }
 
@@ -144,6 +176,8 @@ export interface AlertEvent {
 export interface AlertMetadata {
 	metrics: string[];
 	ops: string[];
+	severities: string[];
+	channel_types: string[];
 }
 
 export interface CreatePortBinding {

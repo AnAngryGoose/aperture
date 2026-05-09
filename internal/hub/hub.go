@@ -125,6 +125,22 @@ func (h *Hub) ingestLoop(ctx context.Context) {
 				h.log.Error("insert metric", "host_id", s.HostID, "err", err)
 				continue
 			}
+			// Best-effort: rich table failures don't abort the ingest loop.
+			if len(s.NetIfaces) > 0 {
+				if err := h.store.InsertNetIfaces(ctx, s); err != nil {
+					h.log.Warn("insert net ifaces", "host_id", s.HostID, "err", err)
+				}
+			}
+			if len(s.DiskMounts) > 0 {
+				if err := h.store.InsertDiskMounts(ctx, s); err != nil {
+					h.log.Warn("insert disk mounts", "host_id", s.HostID, "err", err)
+				}
+			}
+			if len(s.DiskIO) > 0 {
+				if err := h.store.InsertDiskIO(ctx, s); err != nil {
+					h.log.Warn("insert disk io", "host_id", s.HostID, "err", err)
+				}
+			}
 			_ = h.store.TouchHost(ctx, s.HostID, s.Timestamp)
 			if h.evaluator != nil {
 				h.evaluator.Evaluate(ctx, s)

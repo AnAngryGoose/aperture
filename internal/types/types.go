@@ -93,6 +93,60 @@ type MetricSample struct {
 	DiskMounts []DiskMountSample    `json:"disk_mounts,omitempty"`
 	DiskIO     []DiskIOSample       `json:"disk_io,omitempty"`
 	Temps      []TempSample         `json:"temps,omitempty"`
+	Processes  []ProcessSample      `json:"processes,omitempty"`
+}
+
+// ProcessSample is one process's point-in-time resource usage.
+// Returned by /metrics/latest only; never stored in the DB.
+type ProcessSample struct {
+	PID    int32   `json:"pid"`
+	Name   string  `json:"name"`
+	CPUPct float64 `json:"cpu_pct"`
+	MemPct float64 `json:"mem_pct"`
+	MemRSS uint64  `json:"mem_rss"` // bytes of resident set size
+}
+
+// --- Historical rich-metric response types ---
+// These are returned by the /metrics/net, /metrics/mounts, and /metrics/diskio
+// endpoints and are built from the three supplemental SQLite tables.
+
+// NetIfaceSeries holds the per-interface byte counter arrays aligned to
+// NetIfaceHistory.Timestamps.
+type NetIfaceSeries struct {
+	RxBytes []uint64 `json:"rx_bytes"`
+	TxBytes []uint64 `json:"tx_bytes"`
+}
+
+// NetIfaceHistory is the response shape for GET /api/hosts/{id}/metrics/net.
+// Timestamps are Unix seconds; Ifaces maps interface name to its series.
+type NetIfaceHistory struct {
+	Timestamps []int64                    `json:"timestamps"`
+	Ifaces     map[string]*NetIfaceSeries `json:"ifaces"`
+}
+
+// DiskMountSeries holds per-mount used/total byte arrays.
+type DiskMountSeries struct {
+	Used  []uint64 `json:"used"`
+	Total []uint64 `json:"total"`
+}
+
+// DiskMountHistory is the response shape for GET /api/hosts/{id}/metrics/mounts.
+type DiskMountHistory struct {
+	Timestamps []int64                      `json:"timestamps"`
+	Mounts     map[string]*DiskMountSeries  `json:"mounts"`
+}
+
+// DiskIOSeries holds per-device cumulative read/write byte arrays.
+// Rates are derived client-side from consecutive deltas.
+type DiskIOSeries struct {
+	ReadBytes  []uint64 `json:"read_bytes"`
+	WriteBytes []uint64 `json:"write_bytes"`
+}
+
+// DiskIOHistory is the response shape for GET /api/hosts/{id}/metrics/diskio.
+type DiskIOHistory struct {
+	Timestamps []int64                    `json:"timestamps"`
+	Devices    map[string]*DiskIOSeries   `json:"devices"`
 }
 
 // Container is a docker container observed on a host.
@@ -179,7 +233,21 @@ type AlertRule struct {
 	Threshold float64   `json:"threshold"`
 	DurationS int       `json:"duration_s"` // sustained breach time before firing
 	Enabled   bool      `json:"enabled"`
+	Severity  string    `json:"severity"`  // "info"|"warning"|"critical"
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// AlertChannel is a notification destination configured by the user.
+// Config holds type-specific JSON (webhook URL, topic, token, etc.).
+type AlertChannel struct {
+	ID            int64     `json:"id"`
+	Name          string    `json:"name"`
+	Type          string    `json:"type"`          // "discord"|"slack"|"ntfy"|"gotify"|"webhook"
+	Config        []byte    `json:"config"`        // raw JSON, type-specific
+	Enabled       bool      `json:"enabled"`
+	MinSeverity   string    `json:"min_severity"`  // "info"|"warning"|"critical"
+	NotifyResolve bool      `json:"notify_resolve"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // AlertEvent records a fired alert, with ResolvedAt set once the breach ends.

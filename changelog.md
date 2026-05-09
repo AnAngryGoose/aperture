@@ -257,6 +257,93 @@ Roadmap section 1 monitoring and docker management depth. Adds rich live metrics
 
 ---
 
+## [0.2.0-alpha.2] — 2026-05-08
+
+Full Beszel monitoring parity. Adds historical per-interface network, per-mount disk, and disk I/O charts backed by three new SQLite tables, plus a live process list (top 40 by CPU ∪ memory) and a 3-segment memory breakdown bar.
+
+### Added — Backend
+
+- **`internal/store/schema.sql`** — Three new tables: `net_iface_metrics (host_id, ts, iface, rx_bytes, tx_bytes)`, `disk_mount_metrics (host_id, ts, mount, device, fstype, used, total)`, `disk_io_metrics (host_id, ts, device, read_bytes, write_bytes)`. Each uses `PRIMARY KEY (host_id, ts, <entity>)` and a matching index on `(host_id, ts DESC)`. All are `CREATE TABLE IF NOT EXISTS` (idempotent — no migration step; tables appear on next hub start). **Why:** separate tables (not JSON blobs in the `metrics` row) keep queries typed, indexed, and prunable without schema gymnastics. The schema's idempotency means rolling out to an existing install requires no ALTER TABLE.
+- **`internal/types`** — `ProcessSample` (`pid`, `name`, `cpu_pct`, `mem_pct`, `mem_rss`). `MetricSample` gains `Processes []ProcessSample` (`omitempty`, live-only, never stored). Six new history response types: `NetIfaceSeries`/`NetIfaceHistory`, `DiskMountSeries`/`DiskMountHistory`, `DiskIOSeries`/`DiskIOHistory` — pivoted format with a shared `timestamps` array and a per-entity series map. **Why:** the pivoted format lets the frontend render one chart per interface/mount/device with a single array slice — no per-point map lookup.
+- **`internal/store`** — Three new insert methods (`InsertNetIfaces`, `InsertDiskMounts`, `InsertDiskIO`) — each opens a transaction and does `INSERT OR IGNORE` for every entity in the sample. Three new range query methods (`NetIfaceRange`, `DiskMountRange`, `DiskIORange`) — same uniform-stride downsampling pattern as `MetricsRange`: query all rows in time range, group by timestamp in Go, apply stride on unique timestamp list (always keeping the last), then pivot into the history response type using a `tsIndex` map for O(1) slot lookup when filling pre-allocated series arrays. `PruneMetrics` updated to delete from all four tables so rich history respects the same retention window as aggregate metrics. **Why:** the tsIndex approach avoids re-scanning the timestamp list for every row; pre-allocated arrays are cheaper than repeated `append` for the common case of uniform sampling.
+- **`internal/collector`** — `Local` gains `procMu sync.Mutex` and `procCache map[int32]*gopsprocess.Process`. The process cache is initialized in `NewLocal` and updated every tick: dead PIDs are evicted, new PIDs are added via `gopsprocess.NewProcessWithContext`. `CPUPercentWithContext(ctx)` is called on the cached object so it measures elapsed time since the *previous* tick's call (not since process creation) — the correct behaviour matching `top`. First tick for a new process reports CPU=0; acceptable. `sample()` now calls `l.processes(ctx)` at the end and sets `s.Processes`. The method returns the union of top 20 by CPU + top 20 by RSS (up to 40 total). **Why:** without caching the process object, `CPUPercent(0)` would always return 0 for every process because gopsutil computes CPU as `delta / elapsed` since the *same object's* last call.
+- **`internal/hub`** — `ingestLoop` calls `InsertNetIfaces`, `InsertDiskMounts`, `InsertDiskIO` after `InsertMetric` (best-effort: failures are logged but don't abort the loop or affect `TouchHost` / `evaluator.Evaluate`). **Why:** rich data loss is acceptable; the live view still works from the in-memory cache.
+- **`internal/api`** — Three new GET routes registered *before* the existing `/metrics/latest` and `/metrics` routes so chi's static-segment matching takes precedence: `GET /api/hosts/{id}/metrics/net`, `.../metrics/mounts`, `.../metrics/diskio`. Each handler follows the same `range` + `points` query param pattern as `metricsRange` and returns an empty-but-valid struct (non-null) when the time range has no data. **Why:** empty-but-valid allows the frontend to render "no data yet" without a null check.
+
+### Added — Frontend
+
+- **`src/lib/types.ts`** — `ProcessSample` interface; `processes?: ProcessSample[]` added to `MetricSample`; `NetIfaceSeries`, `NetIfaceHistory`, `DiskMountSeries`, `DiskMountHistory`, `DiskIOSeries`, `DiskIOHistory` mirroring the Go history types.
+- **`src/lib/api.ts`** — Three new methods: `netHistory(id, range, points)`, `diskMountHistory(id, range, points)`, `diskIOHistory(id, range, points)`.
+- **`src/routes/hosts/[id]/+page.svelte`** — `load()` now fetches six things in parallel (host, metrics, latest, netHistory, diskMountHistory, diskIOHistory). `deriveRates(timestamps, bytes)` helper computes bytes/s from cumulative delta/elapsed (same pattern as the existing aggregate network chart). New derived states: `ifaceCharts` (per-interface rx/tx rates), `mountCharts` (per-mount used/total GiB), `diskIOSeries` (all devices combined read/write rates). `sortedProcs` sorts the process list by `cpu_pct` or `mem_rss` based on a `procSort` toggle. `memBreakdown` computes a 3-segment memory bar (used / cached / free) from `mem_used`, `mem_cached ?? 0`, and `mem_total`. New sections in the page: **"Processes — live"** table (Name / PID / CPU% / Mem% / RSS with CPU/Memory sort toggle); **"Network — per interface"** (one chart per interface showing rx/tx rates); **"Disk — per mount"** (one chart per mount showing used/total GiB); **"Disk I/O — per device"** (one chart for all devices showing read/write rates). Memory stat card updated to show the 3-segment bar with `.seg-used` / `.seg-cached` / `.seg-free` and a breakdown legend row.
+
+### Verified
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `npm run build` — clean; host detail page chunk grew from ~47 kB to ~71 kB (gzip ~28 kB) for the new sections.
+- Smoke test (15s, 3 samples at 5s interval):
+  - `GET /api/hosts/{id}/metrics/net` → `timestamps[3]` + 10+ interfaces in `ifaces`.
+  - `GET /api/hosts/{id}/metrics/mounts` → `/`, `/boot/efi`, `/mnt/appdata`, and others in `mounts`.
+  - `GET /api/hosts/{id}/metrics/diskio` → `nvme0n1` and partition devices in `devices`.
+  - `GET /api/hosts/{id}/metrics/latest` → `processes[40]`, top entries showing non-zero `cpu_pct` and `mem_rss`.
+
+### Deferred
+
+- Process list historical storage (live-only, like Beszel) — permanently.
+- GPU monitoring, ZFS / RAID / SMART — roadmap section 4.
+- Remote agents, auth, embedded frontend — unchanged from v0.1.0 deferred list.
+
+---
+
+## [0.2.0-alpha.3] — 2026-05-09
+
+Chart UX improvements and extensible alert notification channels (roadmap section 5 start).
+
+### Added — Alert notification channels
+
+- **`internal/store/schema.sql`** — New `alert_channels` table (`id`, `name`, `type`, `config` JSON, `enabled`, `min_severity`, `notify_resolve`, `created_at`). `alert_rules` gains a `severity` column (`'info'|'warning'|'critical'`, default `'warning'`).
+- **`internal/types`** — `AlertChannel` struct (mirrors the table). `AlertRule` gains `Severity string`.
+- **`internal/store`** — `Open` now runs an idempotent `ALTER TABLE alert_rules ADD COLUMN severity` migration (silently ignores "duplicate column name" so existing DBs upgrade transparently). New channel CRUD: `ListAlertChannels`, `ListEnabledChannels`, `GetAlertChannel`, `CreateAlertChannel`, `UpdateAlertChannel`, `DeleteAlertChannel`. Updated `scanAlertRule` to include severity; updated `CreateAlertRule`/`UpdateAlertRule` to persist it.
+- **`internal/alerts/notify.go`** — New `Notifier` type with `NewNotifier(st, log)` and `Dispatch(ctx, event, rule, resolved)`. Dispatch loads enabled channels, filters by `SeverityLevel(ch.MinSeverity) <= SeverityLevel(rule.Severity)` and `ch.NotifyResolve`, then calls `buildSender(ch).Send(ctx, n)` in a goroutine per channel. `SeverityLevel("info")=0`, `"warning"=1`, `"critical"=2`. `BuildSender` (exported) lets the API test handler call it directly without a full Dispatch.
+- **`internal/alerts/ch_discord.go`** — Discord webhook sender: rich embed with title, description, fields (host/metric/value/threshold/severity), color-coded by severity (critical=red/`#e74c3c`, warning=orange/`#f39c12`, info=blue/`#3498db`, resolved=green/`#2ecc71`).
+- **`internal/alerts/ch_slack.go`** — Slack incoming-webhook sender: attachment with `danger/warning/good` color, field rows, title text.
+- **`internal/alerts/ch_ntfy.go`** — ntfy sender: POST to `{url}/{topic}` with `Title`, `Priority` (auto-mapped from severity: critical=urgent, warning=high, info=default; resolved=low), `Tags` (🚨 or ✅ emoji tag). Optional bearer-token auth.
+- **`internal/alerts/ch_gotify.go`** — Gotify sender: POST to `{url}/message?token={token}` with priority auto-mapped (critical=10, warning=5, info=1, resolved=2).
+- **`internal/alerts/ch_webhook.go`** — Generic webhook sender: POST (or configured method) with a JSON payload (`type`, `host`, `rule`, `event`, `resolved_at`). Optional custom headers map.
+- **`internal/alerts/alerts.go`** — `Evaluator` gains `notifier *Notifier` field and `SetNotifier(n)` setter. `fire()` now calls `go e.notifier.Dispatch(ctx, ev, r, false)` after persisting the event. The resolve path in `evalOne` calls `go e.notifier.Dispatch(ctx, ev, r, true)` after `ResolveAlertEvent` succeeds.
+- **`internal/api`** — `Server` gains `notifier *alerts.Notifier`. `NewServer` accepts it. Six new routes under `/api/alerts/channels/`: `GET` list, `POST` create, `GET /{id}`, `PUT /{id}`, `DELETE /{id}`, `POST /{id}/test`. Test handler builds a synthetic `Notification` (cpu_pct > 75, value 75.5) and calls `BuildSender(ch).Send(ctx, notif)` — validates config before it's first used in anger. `alertsMetadata` response extended with `severities` and `channel_types` fields.
+- **`cmd/hub/main.go`** — Constructs `alerts.NewNotifier(st, log)` and calls `ev.SetNotifier(notif)`. Passes `notif` to `api.NewServer`.
+
+### Added — Chart UX
+
+- **`web/src/lib/Chart.svelte`** — Complete rewrite:
+  - **Rich hover tooltip**: `hooks.setCursor` driven, shows timestamp + per-series value + colored dot for each series in an absolutely-positioned overlay div; smart left/right flip when near right edge.
+  - **Dynamic Y-axis sizing**: `axis.size` function measures the longest tick label string (at 7.5px/char + 20px padding) — fixes labels like "29.55 GiB" being clipped at the edge.
+  - **Hex-alpha gradient fills**: `stroke + '29'` (16% opacity) replaces the previous gradient-function approach which crashed the draw cycle when `u.bbox.height == 0` on first render.
+  - **Drag-to-zoom**: `cursor.drag: { x: true }` enabled.
+  - **Double-click to reset**: `hooks.ready` registers a `dblclick` listener on `u.over` that calls `u.setScale('x', {min, max})` back to the full data range.
+  - **`fill: false` series prop**: pass `fill: false` to suppress area fill on reference/total lines.
+  - **Zoom hint**: shows "drag to zoom · double-click to reset" below multi-series charts.
+- **`web/src/routes/hosts/[id]/+page.svelte`** — Charts reorganized into a 2-column responsive grid (`.chart-grid`, `grid-template-columns: repeat(auto-fill, minmax(420px, 1fr))`). Load average chart spans full width (`.span-full`). "Total" series in memory/disk/mount charts use `fill: false` to suppress area fill on the reference line.
+
+### Added — Frontend (notifications)
+
+- **`src/lib/types.ts`** — `AlertChannel` interface; `AlertRule.severity` added; `AlertMetadata` extended with `severities` and `channel_types`.
+- **`src/lib/api.ts`** — Five new alert-channel methods: `alertChannels`, `createAlertChannel`, `updateAlertChannel`, `deleteAlertChannel`, `testAlertChannel`.
+- **`src/routes/alerts/+page.svelte`** — Major rewrite:
+  - **Tab bar** — Rules / Events / Channels tabs.
+  - **Rules tab** — New rule form gains a Severity selector (info/warning/critical). Rules table gains a colored severity badge column.
+  - **Channels tab** — Card list of configured channels; each shows type badge, min-severity pill, resolve toggle state, plus Test / Edit / Enable-toggle / Delete actions. "+ Add Channel" button opens the modal.
+  - **Add/Edit Channel modal** — Type selector (icon buttons: Discord / Slack / ntfy / Gotify / Webhook). Name field. Type-specific config fields (Webhook URL for Discord/Slack; URL + Topic + Token + Priority for ntfy; URL + Token + Priority for Gotify; URL + Method + Headers key-value rows for generic webhook). Min severity radio group. Notify-on-resolve checkbox. Enabled checkbox. Test button (saved channels only), Save and Cancel.
+
+### Verified
+
+- `go build ./...` — clean.
+- `go vet ./...` — clean.
+- `npm run build` — clean.
+
+---
+
 ## [Unreleased]
 
 Roadmap section 1 continues. Remaining section 1 items: agent ↔ hub transport (mTLS/token), agent auto-reconnect and heartbeats, stale-data indicators in the UI, WebUI component stabilization (responsive, consistent error/feedback patterns).
