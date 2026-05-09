@@ -17,6 +17,36 @@ export interface Host {
 	source: string;
 }
 
+export interface NetInterfaceSample {
+	name: string;
+	rx_bytes: number;
+	tx_bytes: number;
+	rx_rate: number; // bytes/s
+	tx_rate: number; // bytes/s
+}
+
+export interface DiskMountSample {
+	device: string;
+	mount: string;
+	fstype: string;
+	used: number;
+	total: number;
+	percent: number;
+}
+
+export interface DiskIOSample {
+	device: string;
+	read_bytes: number;
+	write_bytes: number;
+	read_rate: number;  // bytes/s
+	write_rate: number; // bytes/s
+}
+
+export interface TempSample {
+	name: string;
+	temp_celsius: number;
+}
+
 export interface MetricSample {
 	host_id: string;
 	timestamp: string;
@@ -24,6 +54,8 @@ export interface MetricSample {
 	mem_used: number;
 	mem_total: number;
 	mem_percent: number;
+	mem_avail?: number;
+	mem_cached?: number;
 	swap_used: number;
 	swap_total: number;
 	disk_used: number;
@@ -35,6 +67,12 @@ export interface MetricSample {
 	load_avg_5: number;
 	load_avg_15: number;
 	uptime_secs: number;
+	// Rich live-only fields (present in /latest, absent in /metrics?range=)
+	cpu_per_core?: number[];
+	net_interfaces?: NetInterfaceSample[];
+	disk_mounts?: DiskMountSample[];
+	disk_io?: DiskIOSample[];
+	temps?: TempSample[];
 }
 
 export interface PortMapping {
@@ -42,6 +80,45 @@ export interface PortMapping {
 	private_port: number;
 	public_port?: number;
 	type: string;
+}
+
+export interface ContainerMount {
+	type: string;
+	source: string;
+	destination: string;
+	mode: string;
+	rw: boolean;
+}
+
+export interface ContainerInspect {
+	id: string;
+	name: string;
+	image: string;
+	state: string;
+	status: string;
+	created_at: string;
+	started_at?: string;
+	finished_at?: string;
+	restart_policy: string;
+	entrypoint?: string[];
+	cmd?: string[];
+	env: string[];
+	ports: PortMapping[];
+	mounts: ContainerMount[];
+	labels: Record<string, string>;
+	cpu_percent: number;
+	mem_usage: number;
+	mem_limit: number;
+	mem_percent: number;
+	net_rx_bytes: number;
+	net_tx_bytes: number;
+	nano_cpus: number;
+	mem_limit_bytes: number;
+}
+
+export interface ResourceUpdate {
+	nano_cpus?: number;    // 0 = unlimited
+	memory_bytes?: number; // 0 = unlimited
 }
 
 export interface AlertRule {

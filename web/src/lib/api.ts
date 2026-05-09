@@ -2,6 +2,8 @@ import type {
 	Host,
 	MetricSample,
 	Container,
+	ContainerInspect,
+	ResourceUpdate,
 	AlertRule,
 	AlertEvent,
 	AlertMetadata,
@@ -65,6 +67,12 @@ export const api = {
 		get<Container[]>(`/api/hosts/${id}/containers?all=${all}`),
 	createContainer: (hostID: string, spec: CreateSpec) =>
 		send<{ id: string; warning?: string }>(`/api/hosts/${hostID}/containers`, 'POST', spec),
+	containerInspect: (hostID: string, cid: string) =>
+		get<ContainerInspect>(`/api/hosts/${hostID}/containers/${cid}/inspect`),
+	containerUpdateResources: (hostID: string, cid: string, update: ResourceUpdate) =>
+		send<{ ok: boolean }>(`/api/hosts/${hostID}/containers/${cid}/resources`, 'PUT', update),
+	containerRecreate: (hostID: string, cid: string) =>
+		send<{ id: string; warning?: string }>(`/api/hosts/${hostID}/containers/${cid}/recreate`, 'POST', {}),
 
 	containerAction: (hostID: string, cid: string, action: string) =>
 		post(`/api/hosts/${hostID}/containers/${cid}/${action}`),

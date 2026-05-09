@@ -11,6 +11,7 @@
 		height = 200,
 		title,
 		valueSuffix = '',
+		valueFormatter = null,
 		yMin = undefined,
 		yMax = undefined
 	}: {
@@ -19,6 +20,7 @@
 		height?: number;
 		title?: string;
 		valueSuffix?: string;
+		valueFormatter?: ((v: number) => string) | null;
 		yMin?: number;
 		yMax?: number;
 	} = $props();
@@ -30,6 +32,11 @@
 
 	// Resolved per-series colors so the chip legend matches the rendered lines.
 	let strokes = $derived(series.map((s, i) => s.stroke ?? colors[i % colors.length]));
+
+	function formatTick(v: number): string {
+		if (valueFormatter) return valueFormatter(v);
+		return `${Math.round(v)}${valueSuffix}`;
+	}
 
 	function buildOptions(width: number): Options {
 		return {
@@ -53,8 +60,7 @@
 				{
 					stroke: '#8b93a7',
 					grid: { stroke: '#232a3d' },
-					values: (_self: uPlot, ticks: number[]) =>
-						ticks.map((t) => `${Math.round(t)}${valueSuffix}`)
+					values: (_self: uPlot, ticks: number[]) => ticks.map(formatTick)
 				}
 			],
 			series: [

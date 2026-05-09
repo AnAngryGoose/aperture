@@ -7,6 +7,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -57,9 +58,14 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Get("/hosts/{id}/metrics", s.metricsRange)
 		r.Get("/hosts/{id}/containers", s.listContainers)
 		r.Post("/hosts/{id}/containers", s.containerCreate)
+		// Specific container sub-routes must be registered before the
+		// parameterized /{action} route so chi prefers them on exact match.
+		r.Get("/hosts/{id}/containers/{cid}/inspect", s.containerInspect)
+		r.Get("/hosts/{id}/containers/{cid}/logs", s.containerLogs)
+		r.Put("/hosts/{id}/containers/{cid}/resources", s.containerUpdateResources)
+		r.Post("/hosts/{id}/containers/{cid}/recreate", s.containerRecreate)
 		r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
 		r.Delete("/hosts/{id}/containers/{cid}", s.containerRemove)
-		r.Get("/hosts/{id}/containers/{cid}/logs", s.containerLogs)
 
 		r.Get("/alerts/metadata", s.alertsMetadata)
 		r.Get("/alerts/rules", s.listAlertRules)
@@ -151,8 +157,16 @@ func (s *Server) getHost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, host)
 }
 
+// latestMetric returns the most recent sample for a host. It prefers the
+// hub's in-memory live snapshot (which includes rich per-core/per-interface/
+// per-mount fields) over the DB value, falling back to the DB only when no
+// sample has arrived in the current process lifetime.
 func (s *Server) latestMetric(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if sample, ok := s.hub.LatestSample(id); ok {
+		writeJSON(w, http.StatusOK, sample)
+		return
+	}
 	m, err := s.hub.Store().LatestMetric(r.Context(), id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -229,6 +243,125 @@ func (s *Server) containerCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": cid})
+}
+
+func (s *Server) containerInspect(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	cid := chi.URLParam(r, "cid")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	info, err := d.Inspect(r.Context(), cid)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) containerUpdateResources(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	cid := chi.URLParam(r, "cid")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	var update types.ResourceUpdate
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.UpdateResources(r.Context(), cid, update); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// containerRecreate stops and removes the current container, then creates a new
+// one from the same image + config. Used to pick up a newer image version or
+// reset container state without rewriting the compose spec.
+func (s *Server) containerRecreate(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	cid := chi.URLParam(r, "cid")
+	d, ok := s.hub.Docker(hostID)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+
+	info, err := d.Inspect(r.Context(), cid)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, fmt.Errorf("inspect: %w", err))
+		return
+	}
+
+	spec := inspectToSpec(info)
+
+	// Stop old container (ignore error — may already be stopped).
+	_ = d.Stop(r.Context(), cid, nil)
+
+	if err := d.Remove(r.Context(), cid, true, false); err != nil {
+		writeErr(w, http.StatusBadGateway, fmt.Errorf("remove: %w", err))
+		return
+	}
+
+	newID, err := d.Create(r.Context(), spec)
+	if err != nil {
+		if newID != "" {
+			writeJSON(w, http.StatusAccepted, map[string]any{"id": newID, "warning": err.Error()})
+			return
+		}
+		writeErr(w, http.StatusBadGateway, fmt.Errorf("create: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": newID})
+}
+
+// inspectToSpec rebuilds a minimal CreateSpec from a ContainerInspect so the
+// recreate path can bring up a replacement with the same configuration.
+func inspectToSpec(ci *types.ContainerInspect) types.CreateSpec {
+	spec := types.CreateSpec{
+		Image:         ci.Image,
+		Name:          ci.Name,
+		RestartPolicy: ci.RestartPolicy,
+		AutoStart:     ci.State == "running",
+	}
+	if len(ci.Env) > 0 {
+		env := make(map[string]string, len(ci.Env))
+		for _, kv := range ci.Env {
+			if i := strings.IndexByte(kv, '='); i >= 0 {
+				env[kv[:i]] = kv[i+1:]
+			}
+		}
+		spec.Env = env
+	}
+	seen := make(map[string]bool)
+	for _, p := range ci.Ports {
+		if p.PublicPort == 0 {
+			continue
+		}
+		key := fmt.Sprintf("%d/%s", p.PrivatePort, p.Type)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		spec.Ports = append(spec.Ports, types.PortBinding{
+			HostPort: int(p.PublicPort), ContainerPort: int(p.PrivatePort), Protocol: p.Type,
+		})
+	}
+	for _, m := range ci.Mounts {
+		if m.Type != "bind" {
+			continue
+		}
+		spec.Volumes = append(spec.Volumes, types.VolumeBinding{
+			HostPath: m.Source, ContainerPath: m.Destination, ReadOnly: !m.RW,
+		})
+	}
+	return spec
 }
 
 func (s *Server) containerAction(w http.ResponseWriter, r *http.Request) {
@@ -502,7 +635,7 @@ func corsForDev(next http.Handler) http.Handler {
 		if origin != "" && (strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1")) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		}
 		if r.Method == http.MethodOptions {

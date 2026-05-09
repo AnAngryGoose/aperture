@@ -22,45 +22,97 @@ type Host struct {
 	Source string `json:"source"`
 }
 
+// --- Rich metric sub-types ---
+// These are populated by the collector and returned by /metrics/latest via the
+// hub's in-memory snapshot map. They are NOT persisted in the metrics table.
+
+// NetInterfaceSample is one network interface's cumulative byte counters plus
+// computed rates for the current interval.
+type NetInterfaceSample struct {
+	Name    string  `json:"name"`
+	RxBytes uint64  `json:"rx_bytes"`
+	TxBytes uint64  `json:"tx_bytes"`
+	RxRate  float64 `json:"rx_rate"` // bytes/s since last sample
+	TxRate  float64 `json:"tx_rate"` // bytes/s since last sample
+}
+
+// DiskMountSample is one mounted filesystem's point-in-time usage.
+type DiskMountSample struct {
+	Device  string  `json:"device"`
+	Mount   string  `json:"mount"`
+	FSType  string  `json:"fstype"`
+	Used    uint64  `json:"used"`
+	Total   uint64  `json:"total"`
+	Percent float64 `json:"percent"`
+}
+
+// DiskIOSample is one block device's cumulative I/O byte counters plus rates.
+type DiskIOSample struct {
+	Device    string  `json:"device"`
+	ReadBytes uint64  `json:"read_bytes"`
+	WriteBytes uint64 `json:"write_bytes"`
+	ReadRate  float64 `json:"read_rate"`  // bytes/s since last sample
+	WriteRate float64 `json:"write_rate"` // bytes/s since last sample
+}
+
+// TempSample is one temperature sensor reading.
+type TempSample struct {
+	Name string  `json:"name"`
+	Temp float64 `json:"temp_celsius"`
+}
+
 // MetricSample is one snapshot of host-level resource usage.
+// The base fields (CPUPercent…UptimeSecs) are stored in the metrics table.
+// The rich fields (CPUPerCore…Temps) are live-only: populated by the collector,
+// held in the hub's in-memory snapshot, returned by /metrics/latest, and absent
+// from historical /metrics?range=… responses.
 type MetricSample struct {
-	HostID      string    `json:"host_id"`
-	Timestamp   time.Time `json:"timestamp"`
-	CPUPercent  float64   `json:"cpu_percent"`
-	MemUsed     uint64    `json:"mem_used"`
-	MemTotal    uint64    `json:"mem_total"`
-	MemPercent  float64   `json:"mem_percent"`
-	SwapUsed    uint64    `json:"swap_used"`
-	SwapTotal   uint64    `json:"swap_total"`
-	DiskUsed    uint64    `json:"disk_used"`
-	DiskTotal   uint64    `json:"disk_total"`
-	DiskPercent float64   `json:"disk_percent"`
-	NetRxBytes  uint64    `json:"net_rx_bytes"`
-	NetTxBytes  uint64    `json:"net_tx_bytes"`
-	LoadAvg1    float64   `json:"load_avg_1"`
-	LoadAvg5    float64   `json:"load_avg_5"`
-	LoadAvg15   float64   `json:"load_avg_15"`
-	UptimeSecs  uint64    `json:"uptime_secs"`
+	HostID     string    `json:"host_id"`
+	Timestamp  time.Time `json:"timestamp"`
+	CPUPercent float64   `json:"cpu_percent"`
+	MemUsed    uint64    `json:"mem_used"`
+	MemTotal   uint64    `json:"mem_total"`
+	MemPercent float64   `json:"mem_percent"`
+	MemAvail   uint64    `json:"mem_avail,omitempty"`
+	MemCached  uint64    `json:"mem_cached,omitempty"`
+	SwapUsed   uint64    `json:"swap_used"`
+	SwapTotal  uint64    `json:"swap_total"`
+	DiskUsed   uint64    `json:"disk_used"`
+	DiskTotal  uint64    `json:"disk_total"`
+	DiskPercent float64  `json:"disk_percent"`
+	NetRxBytes uint64    `json:"net_rx_bytes"`
+	NetTxBytes uint64    `json:"net_tx_bytes"`
+	LoadAvg1   float64   `json:"load_avg_1"`
+	LoadAvg5   float64   `json:"load_avg_5"`
+	LoadAvg15  float64   `json:"load_avg_15"`
+	UptimeSecs uint64    `json:"uptime_secs"`
+
+	// Rich live-only fields (not in DB schema).
+	CPUPerCore []float64            `json:"cpu_per_core,omitempty"`
+	NetIfaces  []NetInterfaceSample `json:"net_interfaces,omitempty"`
+	DiskMounts []DiskMountSample    `json:"disk_mounts,omitempty"`
+	DiskIO     []DiskIOSample       `json:"disk_io,omitempty"`
+	Temps      []TempSample         `json:"temps,omitempty"`
 }
 
 // Container is a docker container observed on a host.
 type Container struct {
-	HostID      string            `json:"host_id"`
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Image       string            `json:"image"`
-	State       string            `json:"state"`
-	Status      string            `json:"status"`
-	CreatedAt   time.Time         `json:"created_at"`
-	StartedAt   *time.Time        `json:"started_at,omitempty"`
-	Ports       []PortMapping     `json:"ports"`
-	Labels      map[string]string `json:"labels"`
-	CPUPercent  float64           `json:"cpu_percent"`
-	MemUsage    uint64            `json:"mem_usage"`
-	MemLimit    uint64            `json:"mem_limit"`
-	MemPercent  float64           `json:"mem_percent"`
-	NetRxBytes  uint64            `json:"net_rx_bytes"`
-	NetTxBytes  uint64            `json:"net_tx_bytes"`
+	HostID     string            `json:"host_id"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Image      string            `json:"image"`
+	State      string            `json:"state"`
+	Status     string            `json:"status"`
+	CreatedAt  time.Time         `json:"created_at"`
+	StartedAt  *time.Time        `json:"started_at,omitempty"`
+	Ports      []PortMapping     `json:"ports"`
+	Labels     map[string]string `json:"labels"`
+	CPUPercent float64           `json:"cpu_percent"`
+	MemUsage   uint64            `json:"mem_usage"`
+	MemLimit   uint64            `json:"mem_limit"`
+	MemPercent float64           `json:"mem_percent"`
+	NetRxBytes uint64            `json:"net_rx_bytes"`
+	NetTxBytes uint64            `json:"net_tx_bytes"`
 }
 
 type PortMapping struct {
@@ -70,14 +122,60 @@ type PortMapping struct {
 	Type        string `json:"type"`
 }
 
+// ContainerMount is one mount point from a container inspect.
+type ContainerMount struct {
+	Type        string `json:"type"`        // "bind", "volume", "tmpfs"
+	Source      string `json:"source"`      // host path or volume name
+	Destination string `json:"destination"` // container path
+	Mode        string `json:"mode"`
+	RW          bool   `json:"rw"`
+}
+
+// ContainerInspect is the full detail view for a single container, returned by
+// GET /api/hosts/{id}/containers/{cid}/inspect. Includes live stats when running.
+type ContainerInspect struct {
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Image         string            `json:"image"`
+	State         string            `json:"state"`
+	Status        string            `json:"status"`
+	CreatedAt     time.Time         `json:"created_at"`
+	StartedAt     *time.Time        `json:"started_at,omitempty"`
+	FinishedAt    *time.Time        `json:"finished_at,omitempty"`
+	RestartPolicy string            `json:"restart_policy"`
+	Entrypoint    []string          `json:"entrypoint,omitempty"`
+	Cmd           []string          `json:"cmd,omitempty"`
+	Env           []string          `json:"env"`
+	Ports         []PortMapping     `json:"ports"`
+	Mounts        []ContainerMount  `json:"mounts"`
+	Labels        map[string]string `json:"labels"`
+	// Live stats (zero when not running).
+	CPUPercent float64 `json:"cpu_percent"`
+	MemUsage   uint64  `json:"mem_usage"`
+	MemLimit   uint64  `json:"mem_limit"`
+	MemPercent float64 `json:"mem_percent"`
+	NetRxBytes uint64  `json:"net_rx_bytes"`
+	NetTxBytes uint64  `json:"net_tx_bytes"`
+	// Configured resource limits (0 = unlimited).
+	NanoCPUs      int64 `json:"nano_cpus"`
+	MemLimitBytes int64 `json:"mem_limit_bytes"`
+}
+
+// ResourceUpdate is the body for PUT /api/hosts/{id}/containers/{cid}/resources.
+// nil pointer fields mean "leave unchanged".
+type ResourceUpdate struct {
+	NanoCPUs    *int64 `json:"nano_cpus,omitempty"`    // 0 = unlimited
+	MemoryBytes *int64 `json:"memory_bytes,omitempty"` // 0 = unlimited
+}
+
 // AlertRule is a threshold-based check evaluated on every metric ingest.
 // HostID is a pointer so a NULL value (rule applies to ALL hosts) is
 // distinguishable from an empty string.
 type AlertRule struct {
 	ID        int64     `json:"id"`
 	HostID    *string   `json:"host_id,omitempty"`
-	Metric    string    `json:"metric"`     // see alerts.SupportedMetrics
-	Op        string    `json:"op"`         // ">", ">=", "<", "<="
+	Metric    string    `json:"metric"`    // see alerts.SupportedMetrics
+	Op        string    `json:"op"`        // ">", ">=", "<", "<="
 	Threshold float64   `json:"threshold"`
 	DurationS int       `json:"duration_s"` // sustained breach time before firing
 	Enabled   bool      `json:"enabled"`

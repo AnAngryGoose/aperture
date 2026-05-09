@@ -41,16 +41,22 @@ type DockerProvider interface {
 	Kill(ctx context.Context, id, signal string) error
 	Remove(ctx context.Context, id string, force, removeVolumes bool) error
 	Logs(ctx context.Context, id string, tail int) (string, error)
+	Inspect(ctx context.Context, id string) (*types.ContainerInspect, error)
+	UpdateResources(ctx context.Context, id string, update types.ResourceUpdate) error
 }
 
 type Hub struct {
-	store    *store.Store
-	log      *slog.Logger
-	retain   time.Duration
-	mu       sync.RWMutex
-	dockers  map[string]DockerProvider // host_id -> docker
-	hosts    map[string]types.Host     // host_id -> host (cached)
-	samples  chan types.MetricSample
+	store   *store.Store
+	log     *slog.Logger
+	retain  time.Duration
+	mu      sync.RWMutex
+	dockers map[string]DockerProvider     // host_id -> docker
+	hosts   map[string]types.Host         // host_id -> host (cached)
+	samples chan types.MetricSample
+	// latestRich caches the most recent full sample per host including the
+	// live-only rich fields (per-core CPU, per-interface net, disk mounts, etc.)
+	// that are NOT stored in the metrics table.
+	latestRich map[string]types.MetricSample
 	// evaluator is set by SetEvaluator before Run is called. The interface
 	// type avoids an import cycle with internal/alerts.
 	evaluator Evaluator
@@ -64,9 +70,9 @@ type Evaluator interface {
 }
 
 type Config struct {
-	Store    *store.Store
-	Logger   *slog.Logger
-	Retain   time.Duration // how long to keep metric samples; 0 = forever
+	Store  *store.Store
+	Logger *slog.Logger
+	Retain time.Duration // how long to keep metric samples; 0 = forever
 }
 
 func New(cfg Config) *Hub {
@@ -74,12 +80,13 @@ func New(cfg Config) *Hub {
 		cfg.Logger = slog.Default()
 	}
 	return &Hub{
-		store:   cfg.Store,
-		log:     cfg.Logger,
-		retain:  cfg.Retain,
-		dockers: make(map[string]DockerProvider),
-		hosts:   make(map[string]types.Host),
-		samples: make(chan types.MetricSample, 256),
+		store:      cfg.Store,
+		log:        cfg.Logger,
+		retain:     cfg.Retain,
+		dockers:    make(map[string]DockerProvider),
+		hosts:      make(map[string]types.Host),
+		samples:    make(chan types.MetricSample, 256),
+		latestRich: make(map[string]types.MetricSample),
 	}
 }
 
@@ -109,6 +116,11 @@ func (h *Hub) ingestLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case s := <-h.samples:
+			// Cache the full live snapshot (rich fields not stored in DB).
+			h.mu.Lock()
+			h.latestRich[s.HostID] = s
+			h.mu.Unlock()
+
 			if err := h.store.InsertMetric(ctx, s); err != nil {
 				h.log.Error("insert metric", "host_id", s.HostID, "err", err)
 				continue
@@ -205,6 +217,17 @@ func (h *Hub) Docker(hostID string) (DockerProvider, bool) {
 	defer h.mu.RUnlock()
 	p, ok := h.dockers[hostID]
 	return p, ok
+}
+
+// LatestSample returns the most recently ingested full sample for a host.
+// The returned sample includes rich live-only fields (per-core CPU, per-interface
+// net, disk mounts, disk I/O, temps) that are not in the DB. Returns false if no
+// sample has been ingested yet for this host.
+func (h *Hub) LatestSample(hostID string) (types.MetricSample, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s, ok := h.latestRich[hostID]
+	return s, ok
 }
 
 func (h *Hub) Store() *store.Store { return h.store }

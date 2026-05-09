@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aperture/aperture/internal/types"
+	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
@@ -89,9 +90,9 @@ func (c *Client) List(ctx context.Context, all bool) ([]types.Container, error) 
 }
 
 type containerStats struct {
-	cpuPct, memPct        float64
-	memUsed, memLimit     uint64
-	netRx, netTx          uint64
+	cpuPct, memPct    float64
+	memUsed, memLimit uint64
+	netRx, netTx      uint64
 }
 
 func (c *Client) stats(ctx context.Context, id string) (containerStats, error) {
@@ -209,6 +210,138 @@ func stripLogHeaders(b []byte) string {
 		b = b[sz:]
 	}
 	return sb.String()
+}
+
+// Inspect returns the full configuration and live stats for a container.
+func (c *Client) Inspect(ctx context.Context, id string) (*types.ContainerInspect, error) {
+	info, err := c.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return buildInspect(ctx, c, &info), nil
+}
+
+func buildInspect(ctx context.Context, c *Client, info *dockertypes.ContainerJSON) *types.ContainerInspect {
+	ci := &types.ContainerInspect{
+		ID:    info.ID,
+		Name:  strings.TrimPrefix(info.Name, "/"),
+		Image: info.Config.Image,
+		State: info.State.Status,
+	}
+
+	// Timestamps.
+	if t, err := time.Parse(time.RFC3339Nano, info.Created); err == nil {
+		ci.CreatedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, info.State.StartedAt); err == nil && t.Year() > 1970 {
+		ci.StartedAt = &t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, info.State.FinishedAt); err == nil && t.Year() > 1970 && info.State.FinishedAt != "0001-01-01T00:00:00Z" {
+		ci.FinishedAt = &t
+	}
+
+	// Status string from docker (e.g. "Up 2 hours").
+	ci.Status = info.State.Status
+
+	// Config.
+	ci.RestartPolicy = string(info.HostConfig.RestartPolicy.Name)
+	ci.Env = info.Config.Env
+	if ci.Env == nil {
+		ci.Env = []string{}
+	}
+	if len(info.Config.Entrypoint) > 0 {
+		ci.Entrypoint = []string(info.Config.Entrypoint)
+	}
+	if len(info.Config.Cmd) > 0 {
+		ci.Cmd = []string(info.Config.Cmd)
+	}
+	ci.Labels = info.Config.Labels
+	if ci.Labels == nil {
+		ci.Labels = map[string]string{}
+	}
+
+	// Resource limits.
+	ci.NanoCPUs = info.HostConfig.NanoCPUs
+	ci.MemLimitBytes = info.HostConfig.Memory
+
+	// Ports from NetworkSettings (actual host-bound ports).
+	ci.Ports = []types.PortMapping{}
+	for portKey, bindings := range info.NetworkSettings.Ports {
+		priv := parsePort(string(portKey))
+		proto := parseProto(string(portKey))
+		if len(bindings) == 0 {
+			ci.Ports = append(ci.Ports, types.PortMapping{PrivatePort: priv, Type: proto})
+			continue
+		}
+		for _, b := range bindings {
+			var pub uint16
+			if b.HostPort != "" {
+				var n int
+				_, _ = fmt.Sscanf(b.HostPort, "%d", &n)
+				pub = uint16(n)
+			}
+			ci.Ports = append(ci.Ports, types.PortMapping{
+				IP: b.HostIP, PrivatePort: priv, PublicPort: pub, Type: proto,
+			})
+		}
+	}
+
+	// Mounts.
+	ci.Mounts = []types.ContainerMount{}
+	for _, m := range info.Mounts {
+		ci.Mounts = append(ci.Mounts, types.ContainerMount{
+			Type:        string(m.Type),
+			Source:      m.Source,
+			Destination: m.Destination,
+			Mode:        m.Mode,
+			RW:          m.RW,
+		})
+	}
+
+	// Live stats for running containers.
+	if info.State.Running {
+		if st, err := c.stats(ctx, info.ID); err == nil {
+			ci.CPUPercent = st.cpuPct
+			ci.MemUsage = st.memUsed
+			ci.MemLimit = st.memLimit
+			ci.MemPercent = st.memPct
+			ci.NetRxBytes = st.netRx
+			ci.NetTxBytes = st.netTx
+		}
+	}
+
+	return ci
+}
+
+func parsePort(portStr string) uint16 {
+	if i := strings.Index(portStr, "/"); i >= 0 {
+		portStr = portStr[:i]
+	}
+	var n int
+	_, _ = fmt.Sscanf(portStr, "%d", &n)
+	return uint16(n)
+}
+
+func parseProto(portStr string) string {
+	if i := strings.Index(portStr, "/"); i >= 0 {
+		return portStr[i+1:]
+	}
+	return "tcp"
+}
+
+// UpdateResources updates the CPU and/or memory limits for a container.
+// Both limits can be changed live without restarting the container (cgroup v2
+// required for CPU limits). A value of 0 removes the limit (unlimited).
+func (c *Client) UpdateResources(ctx context.Context, id string, update types.ResourceUpdate) error {
+	res := container.Resources{}
+	if update.NanoCPUs != nil {
+		res.NanoCPUs = *update.NanoCPUs
+	}
+	if update.MemoryBytes != nil {
+		res.Memory = *update.MemoryBytes
+	}
+	_, err := c.cli.ContainerUpdate(ctx, id, container.UpdateConfig{Resources: res})
+	return err
 }
 
 // Create makes a new container from the surface-layer spec and (optionally)

@@ -219,6 +219,44 @@ This `[0.1.0]` rolls up every change from `[0.1.0-alpha.1]` through `[0.1.0-alph
 
 ---
 
+## [0.2.0-alpha.1] — 2026-05-08
+
+Roadmap section 1 monitoring and docker management depth. Adds rich live metrics (per-core CPU, per-interface network, disk mounts, disk I/O, temperatures), full container inspect/resource-edit/recreate lifecycle, container sorting and filtering, and per-host sub-navigation with placeholder pages for upcoming docker-depth features.
+
+### Added — Backend
+
+- **`internal/types`** — Six new types for rich live metrics: `NetInterfaceSample` (per-interface rx/tx bytes + rates), `DiskMountSample` (mount, device, fstype, used/total/pct), `DiskIOSample` (per-device read/write bytes + rates), `TempSample` (sensor name + celsius). `MetricSample` gains optional live-only fields for these (`cpu_per_core`, `net_interfaces`, `disk_mounts`, `disk_io`, `temps`) plus `mem_avail` and `mem_cached` — all `omitempty` so the stored/historical shape is unchanged. Also `ContainerInspect` (full docker container detail: timestamps, config, env, ports, mounts, labels, live stats, resource limits), `ResourceUpdate` (nano_cpus and memory_bytes as pointers so 0 is "unlimited", not "unset"). **Why:** separating live-only and stored fields keeps the SQLite schema and historical queries stable while the live view gets arbitrarily richer.
+- **`internal/collector`** — Major expansion. `Local` now tracks `prevNetIO` and `prevDiskIO` maps across samples to compute bytes/sec rates. New methods: `diskMounts` (reads `disk.PartitionsWithContext`, filters pseudoFS types and Docker overlay/overlay2 paths, calls `disk.UsageWithContext` per mount), `netIfaces` (reads per-interface counters, skips `lo` and `veth*` for the Docker container virtual links, computes rate via delta/elapsed), `diskIO` (reads `disk.IOCountersWithContext`, skips loop/ram/zram devices, computes rates). Temperature collection via `sensors.TemperaturesWithContext` from the separate gopsutil v4 `sensors` package (moved there from `host` in v4). Per-core CPU via `cpu.PercentWithContext(..., true)`. **Why:** `prevNetIO`/`prevDiskIO` maps are the only correct way to derive rates from cumulative OS counters; storing them in the struct (rather than computing across sequential channel sends) keeps the derivation self-contained and correct even if a sample is dropped.
+- **`internal/hub`** — Added `latestRich map[string]types.MetricSample` field. `ingestLoop` stores the full sample in this map (under the mutex) before inserting into SQLite. New `LatestSample(hostID) (MetricSample, bool)` accessor. **Why:** the rich live-only fields (per-core, per-interface, etc.) are not stored in SQLite (no schema migration, no column bloat). The in-memory cache is the only way to expose them. `/metrics/latest` now prefers the cache so callers always get the richest possible snapshot.
+- **`internal/dockerctl`** — `Inspect(ctx, id)` returns a full `*types.ContainerInspect` by calling `ContainerInspect` then one-shot stats. `buildInspect` maps Docker SDK's `ContainerJSON` to `ContainerInspect` — handles timestamps (`*time.Time` for started/finished), ports from `NetworkSettings.Ports`, mounts. `UpdateResources(ctx, id, update)` calls Docker SDK's `ContainerUpdate` with `container.Resources{NanoCPUs, Memory}` for live CPU/memory limit changes without a recreate. **Why:** live limit changes (cgroups) don't require a stop/start; surfacing both paths (update-in-place and recreate) gives the operator flexibility.
+- **`internal/hub`** — `DockerProvider` interface extended with `Inspect` and `UpdateResources` so the compile-time assertion catches new methods.
+- **`internal/api`** — Four new container endpoints, registered before the generic `{action}` route so chi's static-segment matching takes precedence: `GET .../inspect` → `containerInspect`, `PUT .../resources` → `containerUpdateResources`, `POST .../recreate` → `containerRecreate`, `GET .../logs` moved up to same block. `containerRecreate` uses `inspectToSpec` to rebuild a `CreateSpec` from `ContainerInspect` (image, name sans slash, restart policy, env, ports, mounts), then stop → remove → create. **Why:** recreate is stop/remove/create with the same config — surfacing it as one atomic endpoint keeps the UI simple and avoids partial-recreate state if the network call drops mid-way.
+- CORS `Access-Control-Allow-Methods` updated to include `PUT`. **Why:** `containerUpdateResources` uses PUT; without this header the browser's preflight blocks dev-mode API calls.
+- **`latestMetric` handler** — now checks `hub.LatestSample` first and returns the in-memory rich snapshot when available, falling back to `store.LatestMetric` for hosts that haven't sent a sample since the current hub start. **Why:** the SQLite row never has rich live-only fields; only the in-memory snapshot does.
+
+### Added — Frontend
+
+- **`src/lib/types.ts`** — New interfaces: `NetInterfaceSample`, `DiskMountSample`, `DiskIOSample`, `TempSample`, `ContainerMount`, `ContainerInspect`, `ResourceUpdate`. `MetricSample` updated with optional rich fields to match the Go type.
+- **`src/lib/api.ts`** — Three new container methods: `containerInspect(hostID, cid)`, `containerUpdateResources(hostID, cid, update)` (PUT), `containerRecreate(hostID, cid)` (POST).
+- **`src/lib/Chart.svelte`** — Added `valueFormatter?: ((v: number) => string) | null` prop. When provided, replaces the default `Math.round(v) + valueSuffix` formatting on Y-axis ticks. **Why:** memory and disk charts need "4.2 GiB" rather than "4512 MB"; a formatter prop avoids baking unit awareness into the generic Chart component.
+- **`src/routes/hosts/[id]/+page.svelte`** — Comprehensive rewrite. Now fetches `/metrics/latest` separately for the rich live snapshot alongside the historical range data. Sub-navigation added (Overview active, Containers, Networks/Volumes/Images/Logs as placeholders). New sections: per-core CPU grid (small bars labeled C0…Cn, color-coded at 75%/90% thresholds); network interfaces table (rx/tx rate + cumulative bytes, loopback and veth* filtered); disk mounts table (mount, device, fstype, used/total GB, usage bar); disk I/O table (device, read/write rate + total); temperature grid. Historical charts updated with `fmtGiB` valueFormatter for memory/disk and `fmtBytesRate` for network.
+- **`src/routes/hosts/[id]/containers/+page.svelte`** — Major rewrite. Same sub-nav. Filter controls (all / running / exited / paused). Sort controls (Name / State / CPU / Mem with ascending/descending toggle). Row click expands an inline inspect panel (two-column: config left, live stats + resource limits + actions right). Config column: image, state, restart policy, cmd, ports, mounts, env (expandable), labels. Actions: restart/stop/pause/unpause/recreate (with confirm), force-remove, view logs. Resource limits: shows current nano_cpus and mem_limit_bytes with an edit form (CPU in cores × 1e9, memory in GiB × 1073741824). Logs modal upgraded to 1000-line tail with filter input.
+- **`src/routes/hosts/[id]/networks/+page.svelte`**, **`…/volumes/+page.svelte`**, **`…/images/+page.svelte`**, **`…/logs/+page.svelte`** — New placeholder pages so the sub-nav links don't 404. Each shows a centered card with a brief description of what's coming. **Why:** placeholder pages are better UX than 404s — they communicate intent and breadth without requiring the features to be built yet.
+
+### Verified
+
+- `go build ./...` — clean.
+- `npm run build` — clean; four new placeholder page chunks; no a11y errors (two a11y warnings on `role="dialog"` divs were fixed by adding `tabindex="-1"` and `onkeydown` handler).
+
+### Deferred
+
+- Remote agents, auth, embedded frontend — unchanged from v0.1.0 deferred list.
+- Networks / Volumes / Images / Logs docker management — placeholder pages are in place; implementation is roadmap section 3.
+- Notification channels for alerts — roadmap section 5.
+- Container *create* spec depth (capabilities, healthchecks, ulimits, network aliases) — roadmap section 2 (compose-first).
+
+---
+
 ## [Unreleased]
 
-Deciding the next major thrust now that 0.1.0 is out. Likely candidates per the roadmap: **section 1 (solidify the core)** — agent ↔ hub auth/heartbeats and WebUI stabilization, which unblocks every multi-host feature later — or **section 2 (compose-first)** — full compose stack management on the local host, which lets aperture replace dockge/portainer for the user's current homelab usage. Worth picking after a brief week or two of just running 0.1.0 and seeing what feels missing in practice.
+Roadmap section 1 continues. Remaining section 1 items: agent ↔ hub transport (mTLS/token), agent auto-reconnect and heartbeats, stale-data indicators in the UI, WebUI component stabilization (responsive, consistent error/feedback patterns).

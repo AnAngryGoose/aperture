@@ -4,14 +4,14 @@ A single pane of glass for homelab command-and-control. Aperture is a self-hoste
 
 ## What it does (current state)
 
-**v0.1.0** — monitoring + docker container management. The first usable release. Scope:
+**v0.2.0-alpha.1** — rich monitoring depth + complete container lifecycle. Monitoring surfaces per-core CPU, per-interface network (rates + totals), per-mount disk usage, per-device disk I/O rates, and hardware temperatures alongside the historical charts. Container management adds full deep-inspect (config, live stats, resource limits, mounts, env, labels), inline resource limit editing (CPU cores, memory GiB), one-click recreate, container sorting and filtering, and per-host sub-navigation. **v0.1.0** established the base monitoring + container management foundation and is documented below for reference.
 
-- Auto-discovers the local host, samples its system metrics every few seconds, and stores them in SQLite.
+- Auto-discovers the local host, samples its system metrics every few seconds, and stores them in SQLite. Live snapshot is cached in-memory to carry rich fields (per-core, per-interface, temps) that are not stored historically.
 - Lists all docker containers on the host with live CPU/memory stats.
 - Web dashboard:
   - Host overview cards (CPU, memory, disk, container count) with auto-refresh.
-  - Per-host detail view with charts for CPU, memory, disk, network throughput, and load average across configurable time ranges (15m / 1h / 6h / 24h).
-  - Container management: create (surface form: image, name, restart policy, env, ports, volumes, auto-start), start, stop, pause, unpause, restart, kill, remove, view logs.
+  - Per-host detail view: stat cards, per-core CPU grid, network interfaces table (rates + totals), disk mounts table (usage bars), disk I/O table, temperature grid, and time-series charts for CPU, memory, disk, network, and load average across 15m / 1h / 6h / 24h.
+  - Container management: create (surface form: image, name, restart policy, env, ports, volumes, auto-start), deep-inspect (inline expand with full config + live stats + resource limits + actions), resource limit editing (CPU/memory live update), recreate, start, stop, pause, unpause, restart, kill, remove, view logs. Sorting (name/state/cpu/mem) and state filtering.
 - Threshold-based alerts: configurable rules per host (or all hosts) on cpu/mem/disk/swap/load with optional sustained-breach duration; live event history with auto-resolve when the breach ends; nav badge with currently-firing count.
 
 ## Why it exists
@@ -191,6 +191,9 @@ All endpoints live under `/api`. Responses are JSON unless noted.
 | GET | `/api/hosts/{id}/metrics?range=1h&points=300` | Down-sampled samples for the range. |
 | GET | `/api/hosts/{id}/containers?all=true` | Containers on the host. |
 | POST | `/api/hosts/{id}/containers` | Create container from a surface-layer spec (image, name, restart policy, env, ports, volumes, auto-start). Pulls image if missing. Returns `{id}` on success, `{id, warning}` (HTTP 202) if the container was created but failed to start. |
+| GET | `/api/hosts/{id}/containers/{cid}/inspect` | Full container detail: config, timestamps, env, ports, mounts, labels, live stats, and resource limits. |
+| PUT | `/api/hosts/{id}/containers/{cid}/resources` | Live update CPU (`nano_cpus`) and/or memory (`memory_bytes`) limits via cgroups. `0` means "unlimited". No restart required. |
+| POST | `/api/hosts/{id}/containers/{cid}/recreate` | Stop → remove → recreate with the same spec (image, name, restart policy, env, ports, mounts). Returns `{id}` on success, `{id, warning}` (202) on partial success. |
 | POST | `/api/hosts/{id}/containers/{cid}/start` | (also `stop`, `restart`, `pause`, `unpause`, `kill?signal=…`) |
 | DELETE | `/api/hosts/{id}/containers/{cid}?force=&volumes=` | Remove container. |
 | GET | `/api/hosts/{id}/containers/{cid}/logs?tail=200` | Plaintext logs. |
