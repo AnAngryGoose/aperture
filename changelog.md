@@ -422,6 +422,48 @@ UI/UX quality-of-life pass across all pages.
 
 ---
 
+## [0.3.0-alpha.1] — 2026-05-09
+
+Phase 2: Compose-First Workflow — full docker-compose stack management directly from the UI, for both local and remote (agent) hosts.
+
+### Added — Compose backend
+
+- **`internal/compose/compose.go`** — New `compose` package. `Local` struct wraps `docker compose` (v2 plugin) with auto-fallback to `docker-compose` (v1 standalone), detected at startup via version probe. `NewLocal()` returns error if neither binary is available, which the hub and agent handle gracefully. Core methods: `DiscoverStacks` (runs `docker compose ls --all --format json`), `GetStack` (discover + `docker compose ps --all --format json` per project), `StackAction` (runs `up -d --remove-orphans`, `down`, `restart`, `pull`, `stop`, `start` — returns combined stdout/stderr), `Logs` (tailed, per-service or aggregate), `ReadFile` / `WriteFile` (reads/writes compose.yml from the working dir, creates dir and file if absent). Exported `ParseLS` / `ParsePS` helpers parse the JSON output formats including NDJSON (older Compose) and JSON-array (newer Compose). `FindComposeFile` checks all four standard filenames in priority order.
+- **`internal/types`** — `ComposeStack` (project, working_dir, config_files, services, status, running_count, total_count) and `ComposeService` (name, container_id, image, state, status, health, exit_code, ports).
+- **`internal/hub/hub.go`** — `ComposeProvider` interface (same pattern as `DockerProvider`). `Hub` gains `composes map[string]ComposeProvider`, `RegisterCompose(hostID, p)`, and `Compose(hostID) (ComposeProvider, bool)`.
+- **`internal/hub/agentws.go`** — `helloFrame` gains `HasCompose bool`. New `composeReqFrame` / `composeRespFrame` wire types. `agentSession` gains `composePending map[string]chan composeRespFrame`. Cleanup defer drains compose pending channels (parallel to docker pending drain). New `sendComposeCmd` (5-minute timeout for slow pulls). `agentComposeProvider` implements `hub.ComposeProvider` by forwarding all six methods over the WebSocket. On agent connect, hub registers a compose provider if `hello.HasCompose`.
+- **`cmd/hub/main.go`** — After Docker socket registers successfully, probes `compose.NewLocal()`; registers it with `h.RegisterCompose(hostID, lc)`. Logs warn if compose is unavailable without aborting. Version bumped to `0.3.0-alpha.1`.
+- **`cmd/agent/main.go`** — Probes compose availability at startup (`compose.NewLocal()`). Sends `HasCompose: lc != nil` in hello frame. New `composeReqFrame` / `composeRespFrame` frame types (matching hub). Read loop handles `"compose_req"` frames → `go handleComposeReq(...)`. `dispatchCompose` routes actions (`discover`, `get_stack`, `exec`, `logs`, `read_file`, `write_file`) to the local `compose.Local`.
+
+### Added — Compose API
+
+- **`internal/api/api.go`** — Ten new routes under `/api/hosts/{id}/compose/`:
+  - `GET /compose` → list all stacks via `DiscoverStacks`
+  - `POST /compose` → create a new stack (write file + optional `up -d`)
+  - `GET /compose/{project}` → full stack detail with service list
+  - `DELETE /compose/{project}` → `down` (optional `?volumes=true`)
+  - `POST /compose/{project}/{action}` → lifecycle: `up`, `down`, `restart`, `pull`, `stop`, `start`; body can pass `service` (single service), `volumes` (for `down`), `extra_args`
+  - `GET /compose/{project}/logs?service=&tail=200` → tailed logs
+  - `GET /compose/{project}/file?working_dir=` → read compose YAML from disk
+  - `PUT /compose/{project}/file` → write YAML; optional `deploy: true` re-runs `up -d`
+  - All routes return 503 with a human error if no compose provider is registered (host offline, compose not installed).
+
+### Added — Compose UI
+
+- **`web/src/routes/hosts/[id]/compose/+page.svelte`** — New page at `/hosts/{id}/compose`.
+  - **Stack list**: each stack is a collapsible card showing a colored status dot (green=running, orange=partial, gray=stopped), project name, working dir path, service count badge (`N/N running`), status pill, and four quick-action buttons (▶ Up, ⏹ Down, ↺ Restart, ⬇ Pull). Action output (docker compose stdout) appears inline below the card row.
+  - **Expanded stack**: tab bar with three tabs:
+    - **Services** — table of containers: name + short container ID, state pill (color-coded), health badge (healthy/unhealthy/starting), human-readable status, port mappings, and per-service actions (restart/stop or start, view logs shortcut). Per-service actions pre-fill the logs tab.
+    - **Compose File** — monospace YAML textarea loaded on demand. Toolbar shows working-dir path, Reload, Save (write only), and Save + Deploy (write + `up -d`). Dirty indicator when content is modified.
+    - **Logs** — service selector (All or individual service), line count selector (50/200/500/1000), Refresh button, scrollable pre block.
+  - **Stack actions** (Down…): confirmation modal with optional "remove volumes" checkbox.
+  - **New Stack modal**: directory path input (created if missing), YAML textarea (pre-filled with a working nginx template), "Start immediately" checkbox, Create button.
+  - All operations show toasts on success/failure. 8-second auto-refresh keeps service states current without disrupting open panels.
+  - ESC closes any open modal. `<svelte:head>` title: `Aperture — Compose · {hostname}`.
+- **`web/src/routes/hosts/[id]/+page.svelte`** and **`containers/+page.svelte`** — Sub-nav gains **Compose** link between Containers and Networks.
+- **`web/src/lib/types.ts`** — `ComposeStack` and `ComposeService` interfaces.
+- **`web/src/lib/api.ts`** — `composeStacks`, `composeStack`, `composeAction`, `composeLogs`, `composeFile`, `composeWriteFile`, `createComposeStack`, `deleteComposeStack`.
+
 ## [Unreleased]
 
-Phase 1 (Solidify the Core) is complete. Next: Phase 2 — Compose-First Workflow (discover and manage docker-compose stacks from the UI).
+Phase 2 (Compose-First Workflow) is complete. Next: Phase 3 — deeper Docker surface (images, networks, volumes) or Phase 2b compose extensions (stack-level alerts, template library).

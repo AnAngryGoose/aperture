@@ -175,6 +175,8 @@ Orchestration layer. Owns the host registry, the central metric ingest channel, 
 | `(*Hub).RegisterSource(ctx, src)` | Asks the source for `HostInfo`, derives a stable host_id, upserts the host row, then launches the source's `Run` against a per-source channel adapter that stamps the host_id onto every sample. Returns the host_id so the caller can pair it with a docker provider. |
 | `(*Hub).samplesIn(hostID)` | Returns a per-source send channel that stamps `host_id` on samples and forwards to the central channel. Decouples sources from the host_id assignment — sources don't need to know what id they got. Drops on full central buffer with a warning, matching collector backpressure semantics. |
 | `(*Hub).RegisterDocker(hostID, p)` / `Docker(hostID)` | Concurrent-safe registry of docker providers by host. The API uses `Docker` to dispatch container endpoints. |
+| `ComposeProvider` interface | Six-method seam for compose stack operations: `DiscoverStacks`, `GetStack`, `StackAction`, `Logs`, `ReadFile`, `WriteFile`. Local hosts use `compose.Local`; remote agents satisfy it via `agentComposeProvider` in `agentws.go`. |
+| `(*Hub).RegisterCompose(hostID, p)` / `Compose(hostID)` | Parallel to the docker registry. Registered when the local docker socket is available (hub) or when `hello.HasCompose` is true (agent). The API returns 503 if no provider is registered for a host. |
 | `(*Hub).Store()` | Exposes the store for the API package. The alternative — passing the store separately — would require keeping two pointers in lockstep; one accessor is simpler. |
 | `DeriveHostID(info)` | First 16 hex chars of `sha1(source + "|" + name)`. Stable across restarts so historical metrics stay linked to the same host record. When remote agents land, they will provide their own UUID and this is fallback for the local source only. |
 | `Evaluator` interface | One-method seam (`Evaluate(ctx, sample)`) the hub uses to dispatch persisted samples to the alert evaluator. Defined on the hub side (rather than imported from `internal/alerts`) to avoid an import cycle: `alerts` imports `store` for its types and rules, and the hub imports neither. `*alerts.Evaluator` satisfies it; tests can substitute a stub. |
@@ -232,7 +234,21 @@ The hub binary entry point. Responsible for: parsing flags/env, opening the stor
 
 ### `cmd/agent`
 
-Placeholder binary. Compiles, runs, and exits with a message explaining that v0.1 ships single-host. The directory exists from day 1 so the multi-host structure is visible in the repo and so build/CI pipelines that target `./...` cover both binaries already.
+Production binary for remote host monitoring. Probes docker and docker compose at startup; sends both capability flags in the hello frame. Read loop handles `docker_req` and `compose_req` frames concurrently (each dispatched to a goroutine so slow compose operations — image pulls, large `up` runs — don't block metric delivery). The agent binary imports `internal/compose` directly and calls `compose.Local` methods to service compose requests, returning structured JSON in `compose_resp` frames.
+
+### `internal/compose`
+
+New package (`compose.go`). `Local` wraps the `docker compose` CLI (or `docker-compose` v1 fallback, detected at `NewLocal()` time). All operations are pure exec-based — no Docker SDK dependency in this package. Core:
+
+| Method | Implementation |
+| --- | --- |
+| `DiscoverStacks(ctx)` | `docker compose ls --all --format json` → `ParseLS` |
+| `GetStack(ctx, project)` | `DiscoverStacks` for working_dir + `docker compose ps --all --format json` → `ParsePS` |
+| `StackAction(ctx, project, workingDir, action, service, extraArgs...)` | `docker compose --project-name P [--project-directory D] <action> [flags] [service]`. Flags injected per action: `up` gets `-d --remove-orphans`; `pull` gets `--quiet`. Returns combined stdout+stderr. |
+| `Logs(ctx, project, workingDir, service, tail)` | `docker compose logs --tail=N --no-color [service]`. Non-zero exit is tolerated when output is non-empty (stopped stacks). |
+| `ReadFile / WriteFile` | `os.ReadFile` / `os.WriteFile` against the first compose filename found by `FindComposeFile`. `WriteFile` creates the directory and defaults to `compose.yml` when no file exists. |
+| `ParseLS(stdout)` | Handles `[]lsEntry` JSON array. Infers `WorkingDir` from `ConfigFiles` (dirname of first path). |
+| `ParsePS(stdout)` | Handles both JSON array (Compose v2.23+) and NDJSON (older). Sorts services by name. |
 
 ---
 
@@ -327,6 +343,7 @@ uPlot wrapper. Reasons for choosing uPlot: ~45 KB minified, draws thousands of p
 | `+page.svelte` (host list) | Every 5s: fetch `/api/hosts`, then in parallel fetch `latestMetric`, `containers`, and open `alertEvents`. **Host status pills** (online < 15s / stale < 90s / offline ≥ 90s) computed from `last_seen`. **Alert badges** show firing count per host. **Network rate** (↓/↑) in footer when either direction > 500 B/s — derived from consecutive `latest`/`prevLatest` sample deltas. Card border tints: stale = amber, offline = red, alert = red. `absTime` tooltip on the "seen X ago" span. Dynamic page title. |
 | `hosts/[id]/+page.svelte` | Host detail. Fetches host, metrics history, latest, net/mount/diskIO history, and open alerts for this host in parallel. **Alert banner** (red) lists firing count + metric names with a link to `/alerts`. **Stale/offline banners** (amber/red) shown when `last_seen` age >= 15s/90s. **Status pill** in h1. Dynamic title (`Aperture — {host.name}`). `absTime` tooltip on relative-time spans. All other monitoring sections unchanged. |
 | `hosts/[id]/containers/+page.svelte` | Container management. Filter controls (all / running / exited / paused), **text search box** (filters by container name and image, case-insensitive, integrated into `filtered()` derived state). Sort controls (Name / State / CPU / Mem). ESC closes logs modal → create modal → inspect panel (priority order) via `<svelte:window onkeydown>`. Dynamic page title includes host name (fetched once on mount). `absTime` tooltip on container age. Inspect panel, logs modal, and create modal otherwise unchanged. |
+| `hosts/[id]/compose/+page.svelte` | **Compose stack management.** Auto-discovers all stacks via `GET /api/hosts/{id}/compose` on mount with 8s auto-refresh. Each stack is a collapsible card: colored status dot, project name + working dir path, `N/N running` service count badge, status pill (running/partial/stopped), four quick-action buttons (▶ Up, ⏹ Down, ↺ Restart, ⬇ Pull), expand chevron. Action stdout appears inline below the card. **Expanded** shows a 3-tab detail panel: **Services** (table: service name, short container ID, state pill, health badge, human-readable status, ports, per-service restart/stop-start/logs actions), **Compose File** (monospace YAML textarea loaded on demand; toolbar: reload, Save, Save + Deploy; dirty indicator when modified), **Logs** (service selector, tail-count selector, Refresh; scrollable pre block). **Down…** button opens a confirm modal with optional --volumes checkbox. **New Stack modal**: directory path, YAML editor pre-filled with a working template, "Start immediately" toggle. 503 from the API (compose not available) shows a styled banner. ESC closes modals; `<svelte:head>` title. |
 | `hosts/[id]/networks/+page.svelte` | Placeholder. Shows "Docker network inspection, creation, and management coming in a future release." Satisfies the sub-nav link so it doesn't 404; implementation is roadmap section 3. |
 | `hosts/[id]/volumes/+page.svelte` | Placeholder. Same pattern as networks. |
 | `hosts/[id]/images/+page.svelte` | Placeholder. Same pattern. |

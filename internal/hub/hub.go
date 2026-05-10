@@ -45,14 +45,26 @@ type DockerProvider interface {
 	UpdateResources(ctx context.Context, id string, update types.ResourceUpdate) error
 }
 
+// ComposeProvider abstracts docker compose stack operations for a single host.
+// Local hosts use compose.Local; remote agents satisfy this via agentComposeProvider.
+type ComposeProvider interface {
+	DiscoverStacks(ctx context.Context) ([]types.ComposeStack, error)
+	GetStack(ctx context.Context, project string) (*types.ComposeStack, error)
+	StackAction(ctx context.Context, project, workingDir, action, service string, extraArgs ...string) (string, error)
+	Logs(ctx context.Context, project, workingDir, service string, tail int) (string, error)
+	ReadFile(ctx context.Context, workingDir string) (string, error)
+	WriteFile(ctx context.Context, workingDir, content string) error
+}
+
 type Hub struct {
-	store   *store.Store
-	log     *slog.Logger
-	retain  time.Duration
-	mu      sync.RWMutex
-	dockers map[string]DockerProvider     // host_id -> docker
-	hosts   map[string]types.Host         // host_id -> host (cached)
-	samples chan types.MetricSample
+	store    *store.Store
+	log      *slog.Logger
+	retain   time.Duration
+	mu       sync.RWMutex
+	dockers  map[string]DockerProvider  // host_id -> docker
+	composes map[string]ComposeProvider // host_id -> compose
+	hosts    map[string]types.Host      // host_id -> host (cached)
+	samples  chan types.MetricSample
 	// latestRich caches the most recent full sample per host including the
 	// live-only rich fields (per-core CPU, per-interface net, disk mounts, etc.)
 	// that are NOT stored in the metrics table.
@@ -84,6 +96,7 @@ func New(cfg Config) *Hub {
 		log:        cfg.Logger,
 		retain:     cfg.Retain,
 		dockers:    make(map[string]DockerProvider),
+		composes:   make(map[string]ComposeProvider),
 		hosts:      make(map[string]types.Host),
 		samples:    make(chan types.MetricSample, 256),
 		latestRich: make(map[string]types.MetricSample),
@@ -232,6 +245,21 @@ func (h *Hub) Docker(hostID string) (DockerProvider, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	p, ok := h.dockers[hostID]
+	return p, ok
+}
+
+// RegisterCompose attaches a compose provider for a host.
+func (h *Hub) RegisterCompose(hostID string, p ComposeProvider) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.composes[hostID] = p
+}
+
+// Compose returns the compose provider for a host, if one is registered.
+func (h *Hub) Compose(hostID string) (ComposeProvider, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	p, ok := h.composes[hostID]
 	return p, ok
 }
 

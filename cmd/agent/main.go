@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/aperture/aperture/internal/collector"
+	"github.com/aperture/aperture/internal/compose"
 	"github.com/aperture/aperture/internal/dockerctl"
 	"github.com/aperture/aperture/internal/types"
 	"github.com/coder/websocket"
@@ -33,10 +34,32 @@ const agentVersion = "0.2.0-alpha.4"
 // ── wire frame types (must match hub/agentws.go) ────────────────────────────
 
 type helloFrame struct {
-	Type      string         `json:"type"`
-	Host      types.HostInfo `json:"host"`
-	Version   string         `json:"version"`
-	HasDocker bool           `json:"has_docker"`
+	Type       string         `json:"type"`
+	Host       types.HostInfo `json:"host"`
+	Version    string         `json:"version"`
+	HasDocker  bool           `json:"has_docker"`
+	HasCompose bool           `json:"has_compose"`
+}
+
+type composeReqFrame struct {
+	Type       string   `json:"type"`
+	ReqID      string   `json:"req_id"`
+	Action     string   `json:"action"`
+	Project    string   `json:"project,omitempty"`
+	WorkingDir string   `json:"working_dir,omitempty"`
+	SubAction  string   `json:"sub_action,omitempty"`
+	Service    string   `json:"service,omitempty"`
+	ExtraArgs  []string `json:"extra_args,omitempty"`
+	Content    string   `json:"content,omitempty"`
+	Tail       int      `json:"tail,omitempty"`
+}
+
+type composeRespFrame struct {
+	Type  string          `json:"type"`
+	ReqID string          `json:"req_id"`
+	OK    bool            `json:"ok"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	Error string          `json:"error,omitempty"`
 }
 
 type ackFrame struct {
@@ -126,6 +149,17 @@ func main() {
 		}
 	}
 
+	// Probe docker compose availability.
+	var lc *compose.Local
+	if hasDocker {
+		if c, err := compose.NewLocal(); err == nil {
+			lc = c
+			log.Info("compose provider active")
+		} else {
+			log.Warn("compose not available", "err", err)
+		}
+	}
+
 	// Reconnect loop with exponential backoff.
 	backoff := 2 * time.Second
 	const maxBackoff = 60 * time.Second
@@ -138,7 +172,7 @@ func main() {
 		}
 
 		log.Info("connecting to hub", "url", wsURL)
-		err := runSession(ctx, log, wsURL, *token, info, col, hasDocker, dc)
+		err := runSession(ctx, log, wsURL, *token, info, col, hasDocker, dc, lc)
 		if ctx.Err() != nil {
 			return
 		}
@@ -169,7 +203,7 @@ func hubToWS(hubURL string) string {
 	return u + "/api/agents/ws"
 }
 
-// runSession establishes one WebSocket session, runs the metric+docker loop,
+// runSession establishes one WebSocket session, runs the metric+docker+compose loop,
 // and returns when the connection drops or ctx is cancelled.
 func runSession(
 	ctx context.Context,
@@ -179,6 +213,7 @@ func runSession(
 	col *collector.Local,
 	hasDocker bool,
 	dc *dockerctl.Client,
+	lc *compose.Local,
 ) error {
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+token)
@@ -193,10 +228,11 @@ func runSession(
 
 	// Send hello.
 	hello := helloFrame{
-		Type:      "hello",
-		Host:      info,
-		Version:   agentVersion,
-		HasDocker: hasDocker,
+		Type:       "hello",
+		Host:       info,
+		Version:    agentVersion,
+		HasDocker:  hasDocker,
+		HasCompose: lc != nil,
 	}
 	if err := wsjson.Write(ctx, conn, hello); err != nil {
 		return fmt.Errorf("write hello: %w", err)
@@ -272,13 +308,25 @@ func runSession(
 		if err := json.Unmarshal(msg, &peek); err != nil {
 			continue
 		}
-		if peek.Type == "docker_req" && dc != nil {
+		switch peek.Type {
+		case "docker_req":
+			if dc == nil {
+				continue
+			}
 			var req dockerReqFrame
 			if err := json.Unmarshal(msg, &req); err != nil {
 				continue
 			}
-			// Handle asynchronously so we don't block the read loop.
 			go handleDockerReq(ctx, log, conn, dc, req)
+		case "compose_req":
+			if lc == nil {
+				continue
+			}
+			var req composeReqFrame
+			if err := json.Unmarshal(msg, &req); err != nil {
+				continue
+			}
+			go handleComposeReq(ctx, log, conn, lc, req)
 		}
 	}
 }
@@ -426,5 +474,78 @@ func dispatchDocker(ctx context.Context, dc *dockerctl.Client, req dockerReqFram
 
 	default:
 		return nil, fmt.Errorf("unknown docker action: %s", req.Action)
+	}
+}
+
+// handleComposeReq dispatches one compose_req to the local compose runtime.
+func handleComposeReq(ctx context.Context, log *slog.Logger, conn *websocket.Conn, lc *compose.Local, req composeReqFrame) {
+	resp := composeRespFrame{
+		Type:  "compose_resp",
+		ReqID: req.ReqID,
+	}
+	data, err := dispatchCompose(ctx, lc, req)
+	if err != nil {
+		resp.OK = false
+		resp.Error = err.Error()
+		log.Warn("compose req failed", "action", req.Action, "err", err)
+	} else {
+		resp.OK = true
+		resp.Data = data
+	}
+	if werr := wsjson.Write(ctx, conn, resp); werr != nil {
+		log.Warn("write compose_resp failed", "req_id", req.ReqID, "err", werr)
+	}
+}
+
+// dispatchCompose routes a compose_req to the appropriate compose.Local method.
+func dispatchCompose(ctx context.Context, lc *compose.Local, req composeReqFrame) (json.RawMessage, error) {
+	switch req.Action {
+	case "discover":
+		stacks, err := lc.DiscoverStacks(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if stacks == nil {
+			stacks = []types.ComposeStack{}
+		}
+		return json.Marshal(stacks)
+
+	case "get_stack":
+		stack, err := lc.GetStack(ctx, req.Project)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(stack)
+
+	case "exec":
+		out, err := lc.StackAction(ctx, req.Project, req.WorkingDir, req.SubAction, req.Service, req.ExtraArgs...)
+		if err != nil {
+			// Include output in error so the caller can show it.
+			return nil, err
+		}
+		return json.Marshal(map[string]string{"output": out})
+
+	case "logs":
+		out, err := lc.Logs(ctx, req.Project, req.WorkingDir, req.Service, req.Tail)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]string{"output": out})
+
+	case "read_file":
+		content, err := lc.ReadFile(ctx, req.WorkingDir)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]string{"content": content})
+
+	case "write_file":
+		if err := lc.WriteFile(ctx, req.WorkingDir, req.Content); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]bool{"ok": true})
+
+	default:
+		return nil, fmt.Errorf("unknown compose action: %s", req.Action)
 	}
 }

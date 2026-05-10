@@ -317,6 +317,29 @@ type SystemInfo struct {
 	DBSizeBytes int64     `json:"db_size_bytes"`
 }
 
+// ComposeStack represents a discovered docker-compose project.
+type ComposeStack struct {
+	Project      string          `json:"project"`
+	WorkingDir   string          `json:"working_dir"`
+	ConfigFiles  string          `json:"config_files"`
+	Services     []ComposeService `json:"services"`
+	Status       string          `json:"status"`        // "running"|"partial"|"stopped"
+	RunningCount int             `json:"running_count"`
+	TotalCount   int             `json:"total_count"`
+}
+
+// ComposeService is one service entry within a compose stack.
+type ComposeService struct {
+	Name        string        `json:"name"`
+	ContainerID string        `json:"container_id,omitempty"`
+	Image       string        `json:"image,omitempty"`
+	State       string        `json:"state"`             // "running"|"exited"|"paused"|"dead"
+	Status      string        `json:"status"`            // human-readable "Up 2 hours"
+	Health      string        `json:"health,omitempty"`  // "healthy"|"unhealthy"|"starting"
+	ExitCode    int           `json:"exit_code,omitempty"`
+	Ports       []PortMapping `json:"ports,omitempty"`
+}
+
 // HostInfo is the static descriptor a metric source produces once at start.
 // MetricSource implementations populate this so the hub can register the host.
 type HostInfo struct {

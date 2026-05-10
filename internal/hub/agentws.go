@@ -26,10 +26,34 @@ type agentFrame struct {
 
 // helloFrame is the first frame an agent sends after connecting.
 type helloFrame struct {
-	Type      string         `json:"type"` // "hello"
-	Host      types.HostInfo `json:"host"`
-	Version   string         `json:"version"`
-	HasDocker bool           `json:"has_docker"`
+	Type       string         `json:"type"` // "hello"
+	Host       types.HostInfo `json:"host"`
+	Version    string         `json:"version"`
+	HasDocker  bool           `json:"has_docker"`
+	HasCompose bool           `json:"has_compose"`
+}
+
+// composeReqFrame is sent hub→agent to request a compose operation.
+type composeReqFrame struct {
+	Type       string   `json:"type"`                 // "compose_req"
+	ReqID      string   `json:"req_id"`
+	Action     string   `json:"action"`               // "discover"|"get_stack"|"exec"|"logs"|"read_file"|"write_file"
+	Project    string   `json:"project,omitempty"`
+	WorkingDir string   `json:"working_dir,omitempty"`
+	SubAction  string   `json:"sub_action,omitempty"` // for "exec": up, down, restart, pull, stop, start
+	Service    string   `json:"service,omitempty"`
+	ExtraArgs  []string `json:"extra_args,omitempty"`
+	Content    string   `json:"content,omitempty"` // for "write_file"
+	Tail       int      `json:"tail,omitempty"`    // for "logs"
+}
+
+// composeRespFrame is sent agent→hub with the result of a compose operation.
+type composeRespFrame struct {
+	Type  string          `json:"type"` // "compose_resp"
+	ReqID string          `json:"req_id"`
+	OK    bool            `json:"ok"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	Error string          `json:"error,omitempty"`
 }
 
 // metricFrame carries one metric sample.
@@ -65,11 +89,11 @@ type dockerRespFrame struct {
 // ── session ──────────────────────────────────────────────────────────────────
 
 type agentSession struct {
-	conn   *websocket.Conn
-	hostID string
-	mu     sync.Mutex
-	// pending maps req_id → response channel
-	pending map[string]chan dockerRespFrame
+	conn           *websocket.Conn
+	hostID         string
+	mu             sync.Mutex
+	pending        map[string]chan dockerRespFrame  // docker req_id → channel
+	composePending map[string]chan composeRespFrame // compose req_id → channel
 }
 
 // ── handler ──────────────────────────────────────────────────────────────────
@@ -186,19 +210,25 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 5. Register session.
 	sess := &agentSession{
-		conn:    conn,
-		hostID:  hostID,
-		pending: make(map[string]chan dockerRespFrame),
+		conn:           conn,
+		hostID:         hostID,
+		pending:        make(map[string]chan dockerRespFrame),
+		composePending: make(map[string]chan composeRespFrame),
 	}
 	ah.mu.Lock()
 	ah.sessions[hostID] = sess
 	ah.mu.Unlock()
 
-	// 6. Optionally register docker provider.
+	// 6. Optionally register docker + compose providers.
 	if hello.HasDocker {
 		dp := &agentDockerProvider{handler: ah, hostID: hostID}
 		ah.hub.RegisterDocker(hostID, dp)
 		ah.log.Info("docker provider active", "host_id", hostID)
+	}
+	if hello.HasCompose {
+		cp := &agentComposeProvider{handler: ah, hostID: hostID}
+		ah.hub.RegisterCompose(hostID, cp)
+		ah.log.Info("compose provider active", "host_id", hostID)
 	}
 
 	// 7. Send ack.
@@ -217,13 +247,18 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		ah.hub.mu.Lock()
 		delete(ah.hub.dockers, hostID)
+		delete(ah.hub.composes, hostID)
 		ah.hub.mu.Unlock()
 
-		// Drain any pending docker requests so callers unblock.
+		// Drain pending requests so callers unblock immediately.
 		sess.mu.Lock()
 		for reqID, ch := range sess.pending {
 			ch <- dockerRespFrame{ReqID: reqID, OK: false, Error: "agent disconnected"}
 			delete(sess.pending, reqID)
+		}
+		for reqID, ch := range sess.composePending {
+			ch <- composeRespFrame{ReqID: reqID, OK: false, Error: "agent disconnected"}
+			delete(sess.composePending, reqID)
 		}
 		sess.mu.Unlock()
 
@@ -264,6 +299,20 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ch, ok := sess.pending[resp.ReqID]
 			if ok {
 				delete(sess.pending, resp.ReqID)
+			}
+			sess.mu.Unlock()
+			if ok {
+				ch <- resp
+			}
+		case "compose_resp":
+			var resp composeRespFrame
+			if err := json.Unmarshal(raw, &resp); err != nil {
+				continue
+			}
+			sess.mu.Lock()
+			ch, ok := sess.composePending[resp.ReqID]
+			if ok {
+				delete(sess.composePending, resp.ReqID)
 			}
 			sess.mu.Unlock()
 			if ok {
@@ -446,5 +495,161 @@ func (p *agentDockerProvider) Inspect(ctx context.Context, id string) (*types.Co
 func (p *agentDockerProvider) UpdateResources(ctx context.Context, id string, update types.ResourceUpdate) error {
 	params := marshalParams(update)
 	_, err := p.handler.sendDockerCmd(ctx, p.hostID, "update_resources", id, params)
+	return err
+}
+
+// ── agentComposeProvider ─────────────────────────────────────────────────────
+
+// agentComposeProvider implements hub.ComposeProvider by forwarding compose
+// operations to the remote agent over the WebSocket connection.
+type agentComposeProvider struct {
+	handler *AgentHandler
+	hostID  string
+}
+
+// sendComposeCmd sends a compose_req to the agent and waits for compose_resp.
+// Uses a 5-minute timeout since compose pulls and builds can be slow.
+func (ah *AgentHandler) sendComposeCmd(ctx context.Context, hostID string, req composeReqFrame) (json.RawMessage, error) {
+	ah.mu.RLock()
+	sess, ok := ah.sessions[hostID]
+	ah.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("agent not connected for host %s", hostID)
+	}
+
+	reqID := fmt.Sprintf("c%d", ah.reqCounter.Add(1))
+	ch := make(chan composeRespFrame, 1)
+
+	sess.mu.Lock()
+	sess.composePending[reqID] = ch
+	sess.mu.Unlock()
+
+	req.Type = "compose_req"
+	req.ReqID = reqID
+
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := wsjson.Write(writeCtx, sess.conn, req); err != nil {
+		sess.mu.Lock()
+		delete(sess.composePending, reqID)
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("send compose_req: %w", err)
+	}
+
+	// Compose ops like image pulls can take minutes.
+	const timeout = 5 * time.Minute
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case resp := <-ch:
+		if !resp.OK {
+			return nil, fmt.Errorf("%s", resp.Error)
+		}
+		return resp.Data, nil
+	case <-timer.C:
+		sess.mu.Lock()
+		delete(sess.composePending, reqID)
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("compose command timed out after %s", timeout)
+	case <-ctx.Done():
+		sess.mu.Lock()
+		delete(sess.composePending, reqID)
+		sess.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+func (p *agentComposeProvider) DiscoverStacks(ctx context.Context) ([]types.ComposeStack, error) {
+	data, err := p.handler.sendComposeCmd(ctx, p.hostID, composeReqFrame{Action: "discover"})
+	if err != nil {
+		return nil, err
+	}
+	var out []types.ComposeStack
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (p *agentComposeProvider) GetStack(ctx context.Context, project string) (*types.ComposeStack, error) {
+	data, err := p.handler.sendComposeCmd(ctx, p.hostID, composeReqFrame{
+		Action:  "get_stack",
+		Project: project,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out types.ComposeStack
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (p *agentComposeProvider) StackAction(ctx context.Context, project, workingDir, action, service string, extraArgs ...string) (string, error) {
+	data, err := p.handler.sendComposeCmd(ctx, p.hostID, composeReqFrame{
+		Action:     "exec",
+		Project:    project,
+		WorkingDir: workingDir,
+		SubAction:  action,
+		Service:    service,
+		ExtraArgs:  extraArgs,
+	})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
+	return resp.Output, nil
+}
+
+func (p *agentComposeProvider) Logs(ctx context.Context, project, workingDir, service string, tail int) (string, error) {
+	data, err := p.handler.sendComposeCmd(ctx, p.hostID, composeReqFrame{
+		Action:     "logs",
+		Project:    project,
+		WorkingDir: workingDir,
+		Service:    service,
+		Tail:       tail,
+	})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
+	return resp.Output, nil
+}
+
+func (p *agentComposeProvider) ReadFile(ctx context.Context, workingDir string) (string, error) {
+	data, err := p.handler.sendComposeCmd(ctx, p.hostID, composeReqFrame{
+		Action:     "read_file",
+		WorkingDir: workingDir,
+	})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
+func (p *agentComposeProvider) WriteFile(ctx context.Context, workingDir, content string) error {
+	_, err := p.handler.sendComposeCmd(ctx, p.hostID, composeReqFrame{
+		Action:     "write_file",
+		WorkingDir: workingDir,
+		Content:    content,
+	})
 	return err
 }

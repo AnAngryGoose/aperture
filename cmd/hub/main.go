@@ -21,6 +21,7 @@ import (
 	"github.com/aperture/aperture/internal/alerts"
 	"github.com/aperture/aperture/internal/api"
 	"github.com/aperture/aperture/internal/collector"
+	"github.com/aperture/aperture/internal/compose"
 	"github.com/aperture/aperture/internal/dockerctl"
 	"github.com/aperture/aperture/internal/hub"
 	"github.com/aperture/aperture/internal/store"
@@ -28,7 +29,7 @@ import (
 
 // Version identifies the running binary. Bump alongside changelog entries.
 // Surfaced via /api/system/info and the layout footer.
-const Version = "0.2.0-alpha.4"
+const Version = "0.3.0-alpha.1"
 
 func main() {
 	var (
@@ -93,6 +94,14 @@ func main() {
 	} else {
 		h.RegisterDocker(hostID, dc)
 		log.Info("docker provider registered", "host_id", hostID)
+
+		// Attach the local compose provider (requires docker to be available).
+		if lc, err := compose.NewLocal(); err != nil {
+			log.Warn("compose not available", "err", err)
+		} else {
+			h.RegisterCompose(hostID, lc)
+			log.Info("compose provider registered", "host_id", hostID)
+		}
 	}
 
 	agentH := hub.NewAgentHandler(h, st, log)

@@ -238,3 +238,24 @@ export interface Container {
 	net_rx_bytes: number;
 	net_tx_bytes: number;
 }
+
+export interface ComposeService {
+	name: string;
+	container_id?: string;
+	image?: string;
+	state: string; // 'running' | 'exited' | 'paused' | 'dead'
+	status: string;
+	health?: string; // 'healthy' | 'unhealthy' | 'starting'
+	exit_code?: number;
+	ports?: PortMapping[];
+}
+
+export interface ComposeStack {
+	project: string;
+	working_dir: string;
+	config_files: string;
+	services: ComposeService[];
+	status: string; // 'running' | 'partial' | 'stopped'
+	running_count: number;
+	total_count: number;
+}

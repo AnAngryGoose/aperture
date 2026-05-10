@@ -23,6 +23,17 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
+// composeProvider returns the ComposeProvider for a host, or writes a 503 and returns nil.
+func (s *Server) composeProvider(w http.ResponseWriter, hostID string) (hub.ComposeProvider, bool) {
+	cp, ok := s.hub.Compose(hostID)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "docker compose not available for this host (host offline or compose not installed)",
+		})
+	}
+	return cp, ok
+}
+
 type Server struct {
 	hub          *hub.Hub
 	evaluator    *alerts.Evaluator
@@ -71,6 +82,16 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Post("/hosts/{id}/containers/{cid}/recreate", s.containerRecreate)
 		r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
 		r.Delete("/hosts/{id}/containers/{cid}", s.containerRemove)
+
+		// Compose stack management. Specific sub-routes registered before /{action}.
+		r.Get("/hosts/{id}/compose", s.listCompose)
+		r.Post("/hosts/{id}/compose", s.createCompose)
+		r.Get("/hosts/{id}/compose/{project}/file", s.composeReadFile)
+		r.Put("/hosts/{id}/compose/{project}/file", s.composeWriteFile)
+		r.Get("/hosts/{id}/compose/{project}/logs", s.composeLogs)
+		r.Get("/hosts/{id}/compose/{project}", s.getCompose)
+		r.Post("/hosts/{id}/compose/{project}/{action}", s.composeAction)
+		r.Delete("/hosts/{id}/compose/{project}", s.deleteCompose)
 
 		// Agent WebSocket and token management.
 		r.Get("/agents/ws", s.agentHandler.ServeHTTP)
@@ -960,4 +981,251 @@ func corsForDev(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ── compose handlers ─────────────────────────────────────────────────────────
+
+func (s *Server) listCompose(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+	stacks, err := cp.DiscoverStacks(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if stacks == nil {
+		stacks = []types.ComposeStack{}
+	}
+	writeJSON(w, http.StatusOK, stacks)
+}
+
+func (s *Server) getCompose(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	project := chi.URLParam(r, "project")
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+	stack, err := cp.GetStack(r.Context(), project)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, stack)
+}
+
+// composeAction handles POST /hosts/{id}/compose/{project}/{action}
+// Supported actions: up, down, restart, pull, stop, start
+func (s *Server) composeAction(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	project := chi.URLParam(r, "project")
+	action := chi.URLParam(r, "action")
+
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+
+	validActions := map[string]bool{"up": true, "down": true, "restart": true, "pull": true, "stop": true, "start": true}
+	if !validActions[action] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown action: " + action})
+		return
+	}
+
+	var body struct {
+		WorkingDir string   `json:"working_dir"`
+		Service    string   `json:"service"`
+		ExtraArgs  []string `json:"extra_args"`
+		Volumes    bool     `json:"volumes"` // for "down"
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	extraArgs := body.ExtraArgs
+	if action == "down" && body.Volumes {
+		extraArgs = append(extraArgs, "--volumes")
+	}
+
+	out, err := cp.StackAction(r.Context(), project, body.WorkingDir, action, body.Service, extraArgs...)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error":  err.Error(),
+			"output": out,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"output": out})
+}
+
+func (s *Server) composeLogs(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	project := chi.URLParam(r, "project")
+
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+
+	service := r.URL.Query().Get("service")
+	workingDir := r.URL.Query().Get("working_dir")
+	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+	if tail <= 0 {
+		tail = 200
+	}
+
+	logs, err := cp.Logs(r.Context(), project, workingDir, service, tail)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
+}
+
+func (s *Server) composeReadFile(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	project := chi.URLParam(r, "project")
+
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+
+	workingDir := r.URL.Query().Get("working_dir")
+	if workingDir == "" {
+		if stack, err := cp.GetStack(r.Context(), project); err == nil {
+			workingDir = stack.WorkingDir
+		}
+	}
+	if workingDir == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "working_dir required"})
+		return
+	}
+
+	content, err := cp.ReadFile(r.Context(), workingDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"content": content, "working_dir": workingDir})
+}
+
+func (s *Server) composeWriteFile(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	project := chi.URLParam(r, "project")
+
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+
+	var body struct {
+		Content    string `json:"content"`
+		WorkingDir string `json:"working_dir"`
+		Deploy     bool   `json:"deploy"` // run `up -d` after writing
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Content == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content required"})
+		return
+	}
+
+	workingDir := body.WorkingDir
+	if workingDir == "" {
+		if stack, err := cp.GetStack(r.Context(), project); err == nil {
+			workingDir = stack.WorkingDir
+		}
+	}
+	if workingDir == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "working_dir required"})
+		return
+	}
+
+	if err := cp.WriteFile(r.Context(), workingDir, body.Content); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	var output string
+	if body.Deploy {
+		out, err := cp.StackAction(r.Context(), project, workingDir, "up", "", "--remove-orphans")
+		output = out
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": err.Error(), "output": output,
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"output": output})
+}
+
+func (s *Server) createCompose(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+
+	var body struct {
+		WorkingDir string `json:"working_dir"`
+		Content    string `json:"content"`
+		Start      bool   `json:"start"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.WorkingDir == "" || body.Content == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "working_dir and content required"})
+		return
+	}
+
+	if err := cp.WriteFile(r.Context(), body.WorkingDir, body.Content); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if body.Start {
+		if _, err := cp.StackAction(r.Context(), "", body.WorkingDir, "up", "", "--remove-orphans"); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	stacks, err := cp.DiscoverStacks(r.Context())
+	if err != nil || len(stacks) == 0 {
+		writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
+		return
+	}
+	for _, st := range stacks {
+		if st.WorkingDir == body.WorkingDir {
+			writeJSON(w, http.StatusCreated, st)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, stacks[len(stacks)-1])
+}
+
+func (s *Server) deleteCompose(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	project := chi.URLParam(r, "project")
+
+	cp, ok := s.composeProvider(w, hostID)
+	if !ok {
+		return
+	}
+
+	var workingDir string
+	if stack, err := cp.GetStack(r.Context(), project); err == nil {
+		workingDir = stack.WorkingDir
+	}
+
+	extraArgs := []string{}
+	if r.URL.Query().Get("volumes") == "true" {
+		extraArgs = append(extraArgs, "--volumes")
+	}
+
+	if _, err := cp.StackAction(r.Context(), project, workingDir, "down", "", extraArgs...); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
