@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 )
@@ -573,4 +574,78 @@ func (c *Client) ConnectContainer(ctx context.Context, networkID, containerID st
 
 func (c *Client) DisconnectContainer(ctx context.Context, networkID, containerID string) error {
 	return c.cli.NetworkDisconnect(ctx, networkID, containerID, false)
+}
+
+func (c *Client) ListVolumes(ctx context.Context) ([]types.DockerVolume, error) {
+	du, err := c.cli.DiskUsage(ctx, dockertypes.DiskUsageOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]types.DockerVolume, 0, len(du.Volumes))
+	for _, v := range du.Volumes {
+		var sizeBytes int64
+		var refCount int64
+		if v.UsageData != nil {
+			sizeBytes = v.UsageData.Size
+			refCount = v.UsageData.RefCount
+		}
+		out = append(out, types.DockerVolume{
+			Name:       v.Name,
+			Driver:     v.Driver,
+			Mountpoint: v.Mountpoint,
+			CreatedAt:  v.CreatedAt,
+			Labels:     v.Labels,
+			Options:    v.Options,
+			Scope:      v.Scope,
+			SizeBytes:  sizeBytes,
+			RefCount:   refCount,
+		})
+	}
+	return out, nil
+}
+
+func (c *Client) InspectVolume(ctx context.Context, name string) (*types.DockerVolume, error) {
+	v, err := c.cli.VolumeInspect(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	var sizeBytes int64
+	var refCount int64
+	if v.UsageData != nil {
+		sizeBytes = v.UsageData.Size
+		refCount = v.UsageData.RefCount
+	}
+	return &types.DockerVolume{
+		Name:       v.Name,
+		Driver:     v.Driver,
+		Mountpoint: v.Mountpoint,
+		CreatedAt:  v.CreatedAt,
+		Labels:     v.Labels,
+		Options:    v.Options,
+		Scope:      v.Scope,
+		SizeBytes:  sizeBytes,
+		RefCount:   refCount,
+	}, nil
+}
+
+func (c *Client) CreateVolume(ctx context.Context, spec types.VolumeCreateSpec) (string, error) {
+	if strings.TrimSpace(spec.Name) == "" {
+		return "", errors.New("volume name is required")
+	}
+	opts := volume.CreateOptions{
+		Name:       spec.Name,
+		Driver:     spec.Driver,
+		DriverOpts: spec.DriverOpts,
+		Labels:     spec.Labels,
+	}
+	v, err := c.cli.VolumeCreate(ctx, opts)
+	if err != nil {
+		return "", err
+	}
+	return v.Name, nil
+}
+
+func (c *Client) RemoveVolume(ctx context.Context, name string, force bool) error {
+	return c.cli.VolumeRemove(ctx, name, force)
 }

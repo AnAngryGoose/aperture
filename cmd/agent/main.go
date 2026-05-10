@@ -526,6 +526,44 @@ func dispatchDocker(ctx context.Context, dc *dockerctl.Client, req dockerReqFram
 		}
 		return json.Marshal(map[string]bool{"ok": true})
 
+	case "list_volumes":
+		vols, err := dc.ListVolumes(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if vols == nil {
+			vols = []types.DockerVolume{}
+		}
+		return json.Marshal(vols)
+
+	case "inspect_volume":
+		v, err := dc.InspectVolume(ctx, req.CID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(v)
+
+	case "create_volume":
+		var spec types.VolumeCreateSpec
+		if err := json.Unmarshal(req.Params, &spec); err != nil {
+			return nil, fmt.Errorf("unmarshal create volume spec: %w", err)
+		}
+		name, err := dc.CreateVolume(ctx, spec)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]string{"name": name})
+
+	case "remove_volume":
+		var p struct {
+			Force bool `json:"force"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		if err := dc.RemoveVolume(ctx, req.CID, p.Force); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]bool{"ok": true})
+
 	default:
 		return nil, fmt.Errorf("unknown docker action: %s", req.Action)
 	}

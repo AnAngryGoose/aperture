@@ -268,6 +268,25 @@ export interface NetworkCreateSpec {
 	labels?: Record<string, string>;
 }
 
+export interface DockerVolume {
+	name: string;
+	driver: string;
+	mountpoint: string;
+	created_at: string;
+	labels: Record<string, string>;
+	options: Record<string, string>;
+	scope: string;
+	size_bytes: number;
+	ref_count: number;
+}
+
+export interface VolumeCreateSpec {
+	name: string;
+	driver?: string;
+	driver_opts?: Record<string, string>;
+	labels?: Record<string, string>;
+}
+
 export interface ComposeService {
 	name: string;
 	container_id?: string;

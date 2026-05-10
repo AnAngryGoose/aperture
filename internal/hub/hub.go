@@ -49,6 +49,10 @@ type DockerProvider interface {
 	RemoveNetwork(ctx context.Context, id string) error
 	ConnectContainer(ctx context.Context, networkID, containerID string) error
 	DisconnectContainer(ctx context.Context, networkID, containerID string) error
+	ListVolumes(ctx context.Context) ([]types.DockerVolume, error)
+	InspectVolume(ctx context.Context, name string) (*types.DockerVolume, error)
+	CreateVolume(ctx context.Context, spec types.VolumeCreateSpec) (string, error)
+	RemoveVolume(ctx context.Context, name string, force bool) error
 }
 
 // ComposeProvider abstracts docker compose stack operations for a single host.

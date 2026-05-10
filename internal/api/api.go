@@ -91,6 +91,12 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Post("/hosts/{id}/networks/{net_id}/connect", s.connectNetwork)
 		r.Post("/hosts/{id}/networks/{net_id}/disconnect", s.disconnectNetwork)
 
+		// Volume management.
+		r.Get("/hosts/{id}/volumes", s.listVolumes)
+		r.Post("/hosts/{id}/volumes", s.createVolume)
+		r.Get("/hosts/{id}/volumes/{name}", s.inspectVolume)
+		r.Delete("/hosts/{id}/volumes/{name}", s.removeVolume)
+
 		// Compose stack management. Specific sub-routes registered before /{action}.
 		r.Get("/hosts/{id}/compose", s.listCompose)
 		r.Post("/hosts/{id}/compose", s.createCompose)
@@ -654,6 +660,78 @@ func (s *Server) disconnectNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.DisconnectContainer(r.Context(), netID, p.ContainerID); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// --- volumes ---
+
+func (s *Server) listVolumes(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	vols, err := d.ListVolumes(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	if vols == nil {
+		vols = []types.DockerVolume{}
+	}
+	writeJSON(w, http.StatusOK, vols)
+}
+
+func (s *Server) inspectVolume(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	name := chi.URLParam(r, "name")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	v, err := d.InspectVolume(r.Context(), name)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) createVolume(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	var spec types.VolumeCreateSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	name, err := d.CreateVolume(r.Context(), spec)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"name": name})
+}
+
+func (s *Server) removeVolume(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	name := chi.URLParam(r, "name")
+	force := r.URL.Query().Get("force") == "true"
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	if err := d.RemoveVolume(r.Context(), name, force); err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}

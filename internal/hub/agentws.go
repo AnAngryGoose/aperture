@@ -554,6 +554,52 @@ func (p *agentDockerProvider) DisconnectContainer(ctx context.Context, networkID
 	return err
 }
 
+func (p *agentDockerProvider) ListVolumes(ctx context.Context) ([]types.DockerVolume, error) {
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "list_volumes", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out []types.DockerVolume
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (p *agentDockerProvider) InspectVolume(ctx context.Context, name string) (*types.DockerVolume, error) {
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "inspect_volume", name, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out types.DockerVolume
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (p *agentDockerProvider) CreateVolume(ctx context.Context, spec types.VolumeCreateSpec) (string, error) {
+	params := marshalParams(spec)
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "create_volume", "", params)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
+	return resp.Name, nil
+}
+
+func (p *agentDockerProvider) RemoveVolume(ctx context.Context, name string, force bool) error {
+	params := marshalParams(map[string]any{"force": force})
+	_, err := p.handler.sendDockerCmd(ctx, p.hostID, "remove_volume", name, params)
+	return err
+}
+
+
 // ── agentComposeProvider ─────────────────────────────────────────────────────
 
 // agentComposeProvider implements hub.ComposeProvider by forwarding compose

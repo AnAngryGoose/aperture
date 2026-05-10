@@ -261,6 +261,27 @@ type NetworkCreateSpec struct {
 	Labels   map[string]string `json:"labels,omitempty"`
 }
 
+// DockerVolume represents a docker volume.
+type DockerVolume struct {
+	Name       string            `json:"name"`
+	Driver     string            `json:"driver"`
+	Mountpoint string            `json:"mountpoint"`
+	CreatedAt  string            `json:"created_at"`
+	Labels     map[string]string `json:"labels"`
+	Options    map[string]string `json:"options"`
+	Scope      string            `json:"scope"`
+	SizeBytes  int64             `json:"size_bytes"`
+	RefCount   int64             `json:"ref_count"`
+}
+
+// VolumeCreateSpec is the surface-layer volume-create request.
+type VolumeCreateSpec struct {
+	Name       string            `json:"name"`
+	Driver     string            `json:"driver,omitempty"` // default "local"
+	DriverOpts map[string]string `json:"driver_opts,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+}
+
 // ResourceUpdate is the body for PUT /api/hosts/{id}/containers/{cid}/resources.
 // nil pointer fields mean "leave unchanged".
 type ResourceUpdate struct {

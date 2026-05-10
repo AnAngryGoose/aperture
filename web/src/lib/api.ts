@@ -17,7 +17,9 @@ import type {
 	ComposeStack,
 	ComposeService,
 	DockerNetwork,
-	NetworkCreateSpec
+	NetworkCreateSpec,
+	DockerVolume,
+	VolumeCreateSpec
 } from './types';
 
 // In dev, the SvelteKit dev server runs on :5173 and the Go hub on :8080.
@@ -110,6 +112,14 @@ export const api = {
 		send<{ ok: boolean }>(`/api/hosts/${hostID}/networks/${netID}/connect`, 'POST', { container_id: containerID }),
 	disconnectNetwork: (hostID: string, netID: string, containerID: string) =>
 		send<{ ok: boolean }>(`/api/hosts/${hostID}/networks/${netID}/disconnect`, 'POST', { container_id: containerID }),
+
+	volumes: (id: string) => get<DockerVolume[]>(`/api/hosts/${id}/volumes`),
+	volumeInspect: (hostID: string, name: string) =>
+		get<DockerVolume>(`/api/hosts/${hostID}/volumes/${name}`),
+	createVolume: (hostID: string, spec: VolumeCreateSpec) =>
+		send<{ name: string }>(`/api/hosts/${hostID}/volumes`, 'POST', spec),
+	removeVolume: (hostID: string, name: string, force = false) =>
+		del(`/api/hosts/${hostID}/volumes/${name}?force=${force}`),
 
 	alertMetadata: () => get<AlertMetadata>('/api/alerts/metadata'),
 	alertRules: (hostID?: string) =>

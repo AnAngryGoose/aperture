@@ -217,8 +217,8 @@
 	<a href={`/hosts/${id}`} class="active">Overview</a>
 	<a href={`/hosts/${id}/containers`}>Containers</a>
 	<a href={`/hosts/${id}/compose`}>Compose</a>
-	<a href={`/hosts/${id}/networks`} class="placeholder">Networks</a>
-	<a href={`/hosts/${id}/volumes`} class="placeholder">Volumes</a>
+	<a href={`/hosts/${id}/networks`} class="">Networks</a>
+	<a href={`/hosts/${id}/volumes`} class="">Volumes</a>
 	<a href={`/hosts/${id}/images`} class="placeholder">Images</a>
 	<a href={`/hosts/${id}/logs`} class="placeholder">Logs</a>
 </nav>
