@@ -6,6 +6,7 @@
 	import { api } from '$lib/api';
 	import type { SystemInfo } from '$lib/types';
 	import { formatBytes, formatDuration } from '$lib/format';
+	import Toast from '$lib/Toast.svelte';
 
 	let { children } = $props();
 	let firing = $state(0);
@@ -20,7 +21,7 @@
 			const evs = await api.alertEvents({ openOnly: true, limit: 200 });
 			firing = evs.length;
 		} catch {
-			// ignore — banner already surfaces page-level errors
+			// silent — badge hides when API is unreachable
 		}
 	}
 
@@ -28,7 +29,7 @@
 		try {
 			sys = await api.systemInfo();
 		} catch {
-			// ignore — footer just hides if we can't reach the API
+			// silent — footer hides when API is unreachable
 		}
 	}
 
@@ -40,21 +41,15 @@
 		refreshFiring();
 		refreshSystem();
 		alertTimer = setInterval(refreshFiring, 5000);
-		// DB size doesn't change quickly; 30s is plenty.
-		sysTimer = setInterval(refreshSystem, 30000);
-		// 1s clock so the uptime ticks visibly without polling the API.
+		sysTimer   = setInterval(refreshSystem, 30000);
 		clockTimer = setInterval(() => (now = Date.now()), 1000);
 	});
 	onDestroy(() => {
 		if (alertTimer) clearInterval(alertTimer);
-		if (sysTimer) clearInterval(sysTimer);
+		if (sysTimer)   clearInterval(sysTimer);
 		if (clockTimer) clearInterval(clockTimer);
 	});
 </script>
-
-<svelte:head>
-	<title>Aperture</title>
-</svelte:head>
 
 <header>
 	<div class="brand">
@@ -87,6 +82,8 @@
 		<span>—</span>
 	{/if}
 </footer>
+
+<Toast />
 
 <style>
 	header {

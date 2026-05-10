@@ -344,6 +344,51 @@ Chart UX improvements and extensible alert notification channels (roadmap sectio
 
 ---
 
+## [0.2.0-alpha.4] — 2026-05-09
+
+UI/UX quality-of-life pass across all pages.
+
+### Added — Format utilities
+
+- **`web/src/lib/format.ts`** — `formatBytesRate(bps)` — auto-scales bytes/s through B/s → KiB/s → MiB/s → GiB/s. `formatDuration` now includes seconds for durations < 1 min (e.g. `42s`, `1m 30s`). `absTime(iso)` returns a locale-formatted absolute timestamp string for use in `title` attributes.
+
+### Added — Toast notification system
+
+- **`web/src/lib/toast.ts`** — Svelte writable store driving an auto-dismiss toast queue. `toast.info`, `toast.success`, `toast.error(msg, durationMs)` add toasts; `toast.remove(id)` dismisses immediately. Auto-dismiss is 4s for info/success, 6s for errors.
+- **`web/src/lib/Toast.svelte`** — Fixed-position stack (bottom-right). Slide-in animation. Color-coded left border (accent=info, green=success, red=error). Per-toast dismiss button. `aria-live="polite"` for accessibility.
+- **`web/src/routes/+layout.svelte`** — `<Toast />` added to layout so toasts appear globally; individual pages no longer need to mount it.
+
+### Added — Dashboard (`/`)
+
+- **Host status pill** — each card now shows an `online` / `stale` / `offline` pill computed from `last_seen` age (< 15s = online, < 90s = stale, ≥ 90s = offline). Card border tints: stale = amber, offline = red.
+- **Per-host alert badge** — cards with firing alerts show `⚠ N` badge and a red border tint.
+- **Network rate footer item** — `↓ rx ↑ tx` shown in each card footer when either direction > 500 B/s. Derived from consecutive sample deltas (the page now tracks `prevLatest` alongside `latest`).
+- **Absolute timestamp on hover** — "seen X ago" span has `title={absTime(h.last_seen)}` for full timestamp on hover.
+- **`<svelte:head>`** — page title set to `Aperture — Hosts`.
+
+### Added — Host detail (`/hosts/[id]`)
+
+- **`<svelte:head>`** — title set to `Aperture — {host.name}` (dynamic once host loads).
+- **Status pill in h1** — stale/offline pill shown inline in the heading when host is not online.
+- **Alert banner** — red banner appears below the subnav listing the count and metric names of any firing alerts for this host, with a "View alerts →" link.
+- **Stale/offline banners** — amber warning or red error banner when the host is stale or offline, showing last-seen time with absolute timestamp on hover.
+- **Absolute timestamp on hover** — "seen X ago" in the Uptime stat card has `title={absTime(host.last_seen)}`.
+- **`openAlerts` state** — `api.alertEvents({ hostID: id, openOnly: true })` is fetched in parallel with the rest of the page data on each refresh cycle.
+
+### Added — Containers page (`/hosts/[id]/containers`)
+
+- **Quick search/filter** — text input in the toolbar filters the table by container name and image substring, case-insensitive. Empty state message includes the search term when filtering.
+- **ESC closes modals** — `<svelte:window onkeydown>` handles Escape to dismiss logs modal, create modal, and the inspect expand panel (in priority order).
+- **`<svelte:head>`** — title set to `Aperture — {hostName} — Containers` (host name fetched once on mount).
+- **Absolute timestamp on hover** — container age `relTime` has `title={absTime(c.created_at)}`.
+
+### Added — Alerts page (`/alerts`)
+
+- **`<svelte:head>`** — page title set to `Aperture — Alerts`.
+- **ESC closes channel modal** — `<svelte:window onkeydown>` dismisses the add/edit channel modal on Escape.
+
+---
+
 ## [Unreleased]
 
-Roadmap section 1 continues. Remaining section 1 items: agent ↔ hub transport (mTLS/token), agent auto-reconnect and heartbeats, stale-data indicators in the UI, WebUI component stabilization (responsive, consistent error/feedback patterns).
+Roadmap section 1 continues. Remaining items: agent ↔ hub transport (mTLS/token), agent auto-reconnect and heartbeats.

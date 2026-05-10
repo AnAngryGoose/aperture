@@ -333,10 +333,17 @@
 	});
 	onDestroy(() => { if (timer) clearInterval(timer); });
 
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape' && chModalOpen) chModalOpen = false;
+	}
+
 	const SEV_COLORS: Record<string, string> = {
 		info: '#3498db', warning: '#f39c12', critical: '#e74c3c'
 	};
 </script>
+
+<svelte:head><title>Aperture — Alerts</title></svelte:head>
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="page-header">
 	<h1>Alerts</h1>

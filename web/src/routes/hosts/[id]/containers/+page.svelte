@@ -4,9 +4,10 @@
 	import { api } from '$lib/api';
 	import type { Container, ContainerInspect, CreateSpec, CreatePortBinding, CreateVolumeBinding } from '$lib/types';
 	import Bar from '$lib/Bar.svelte';
-	import { formatBytes, formatPct, relTime } from '$lib/format';
+	import { formatBytes, formatPct, relTime, absTime } from '$lib/format';
 
 	let id = $derived(page.params.id);
+	let hostName = $state('');
 	let containers = $state<Container[]>([]);
 	let error = $state<string | null>(null);
 	let busy = $state<Record<string, boolean>>({});
@@ -17,11 +18,15 @@
 	let sortKey = $state<SortKey>('name');
 	let sortAsc = $state(true);
 	let stateFilter = $state<'all' | 'running' | 'exited' | 'paused'>('all');
+	let nameFilter = $state('');
 
 	let filtered = $derived(() => {
-		let list = containers.filter((c) =>
-			stateFilter === 'all' ? true : c.state === stateFilter
-		);
+		const needle = nameFilter.toLowerCase().trim();
+		let list = containers.filter((c) => {
+			if (stateFilter !== 'all' && c.state !== stateFilter) return false;
+			if (needle && !c.name.toLowerCase().includes(needle) && !c.image.toLowerCase().includes(needle)) return false;
+			return true;
+		});
 		list = [...list].sort((a, b) => {
 			let cmp = 0;
 			if (sortKey === 'name') cmp = a.name.localeCompare(b.name);
@@ -181,9 +186,17 @@
 		}
 	}
 
-	onMount(() => {
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key !== 'Escape') return;
+		if (logsFor) { logsFor = null; return; }
+		if (showCreate) { showCreate = false; return; }
+		if (inspectCid) { inspectCid = null; inspectData = null; return; }
+	}
+
+	onMount(async () => {
 		refresh();
 		timer = setInterval(refresh, 5000);
+		try { const h = await api.host(id); hostName = h.name; } catch { /* best-effort */ }
 	});
 	onDestroy(() => {
 		if (timer) clearInterval(timer);
@@ -244,6 +257,9 @@
 	let running = $derived(containers.filter((c) => c.state === 'running').length);
 </script>
 
+<svelte:head><title>Aperture — {hostName || id} — Containers</title></svelte:head>
+<svelte:window onkeydown={handleKeydown} />
+
 <div class="page-header">
 	<div>
 		<a href={`/hosts/${id}`} class="back">← back to host</a>
@@ -274,6 +290,7 @@
 			<button class:active={stateFilter === f} onclick={() => (stateFilter = f as typeof stateFilter)}>{f}</button>
 		{/each}
 	</div>
+	<input class="name-search" type="text" placeholder="search name / image…" bind:value={nameFilter} />
 	<div class="sorts muted small">
 		Sort:
 		{#each [['name','Name'],['state','State'],['cpu','CPU'],['mem','Mem']] as [k,label]}
@@ -302,7 +319,7 @@
 				<tr class:expanded={inspectCid === c.id} onclick={() => openInspect(c.id)}>
 					<td>
 						<div class="cname">{c.name || c.id.slice(0, 12)}</div>
-						<div class="muted mono small">{c.id.slice(0, 12)} · {relTime(c.created_at)}</div>
+						<div class="muted mono small">{c.id.slice(0, 12)} · <span title={absTime(c.created_at)}>{relTime(c.created_at)}</span></div>
 					</td>
 					<td class="mono small muted">{c.image}</td>
 					<td><span class="pill {c.state}">{c.state}</span></td>
@@ -486,7 +503,7 @@
 				{/if}
 			{/each}
 			{#if filtered().length === 0 && !error}
-				<tr><td colspan="7" class="muted center">no containers{stateFilter !== 'all' ? ` in state "${stateFilter}"` : ''}</td></tr>
+				<tr><td colspan="7" class="muted center">no containers{stateFilter !== 'all' ? ` in state "${stateFilter}"` : ''}{nameFilter.trim() ? ` matching "${nameFilter.trim()}"` : ''}</td></tr>
 			{/if}
 		</tbody>
 	</table>
@@ -634,6 +651,17 @@
 	}
 	.filters { display: flex; gap: 4px; }
 	.filters button.active { border-color: var(--accent); color: var(--accent); }
+	.name-search {
+		background: var(--bg-elev-2);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		color: var(--text);
+		padding: 4px 10px;
+		font: inherit;
+		font-size: 12px;
+		width: 200px;
+	}
+	.name-search:focus { outline: none; border-color: var(--accent); }
 	.sorts { display: flex; align-items: center; gap: 4px; }
 	.sort-btn { font-size: 11px; padding: 3px 8px; }
 	.sort-btn.active { border-color: var(--accent); color: var(--accent); }

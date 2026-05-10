@@ -5,7 +5,8 @@
 	import type { Host, MetricSample, NetIfaceHistory, DiskMountHistory, DiskIOHistory } from '$lib/types';
 	import Bar from '$lib/Bar.svelte';
 	import Chart from '$lib/Chart.svelte';
-	import { formatBytes, formatPct, formatDuration, relTime } from '$lib/format';
+	import type { AlertEvent } from '$lib/types';
+	import { formatBytes, formatBytesRate, formatPct, formatDuration, relTime, absTime } from '$lib/format';
 
 	let id = $derived(page.params.id);
 	let host = $state<Host | null>(null);
@@ -17,17 +18,27 @@
 	let range = $state<'15m' | '1h' | '6h' | '24h'>('1h');
 	let error = $state<string | null>(null);
 	let procSort = $state<'cpu' | 'mem'>('cpu');
+	let openAlerts = $state<AlertEvent[]>([]);
 	let timer: ReturnType<typeof setInterval> | null = null;
+
+	let hostStatus = $derived.by<'online' | 'stale' | 'offline'>(() => {
+		if (!host) return 'offline';
+		const age = (Date.now() - new Date(host.last_seen).getTime()) / 1000;
+		if (age < 15) return 'online';
+		if (age < 90) return 'stale';
+		return 'offline';
+	});
 
 	async function load() {
 		try {
-			const [h, ms, lv, nh, mh, dh] = await Promise.all([
+			const [h, ms, lv, nh, mh, dh, alerts] = await Promise.all([
 				api.host(id),
 				api.metrics(id, range, 300),
 				api.latest(id),
 				api.netHistory(id, range, 300),
 				api.diskMountHistory(id, range, 300),
-				api.diskIOHistory(id, range, 300)
+				api.diskIOHistory(id, range, 300),
+				api.alertEvents({ hostID: id, openOnly: true, limit: 100 }).catch(() => [] as AlertEvent[])
 			]);
 			host = h;
 			samples = ms;
@@ -35,6 +46,7 @@
 			netH = nh;
 			mountH = mh;
 			diskIOH = dh;
+			openAlerts = alerts;
 			error = null;
 		} catch (e) {
 			error = (e as Error).message;
@@ -170,10 +182,17 @@
 	}
 </script>
 
+<svelte:head><title>Aperture — {host?.name ?? id}</title></svelte:head>
+
 <div class="page-header">
 	<div>
 		<a href="/" class="back">← all hosts</a>
-		<h1>{host?.name ?? id}</h1>
+		<h1>
+			{host?.name ?? id}
+			{#if hostStatus !== 'online'}
+				<span class="status-pill status-{hostStatus}">{hostStatus}</span>
+			{/if}
+		</h1>
 		{#if host}
 			<div class="muted mono">
 				{host.platform || host.os} · {host.arch} · {host.cpu_count} vCPU · {formatBytes(host.mem_total)} RAM
@@ -199,6 +218,27 @@
 	<a href={`/hosts/${id}/images`} class="placeholder">Images</a>
 	<a href={`/hosts/${id}/logs`} class="placeholder">Logs</a>
 </nav>
+
+{#if openAlerts.length > 0}
+	<div class="alert-banner">
+		<span class="alert-icon">⚠</span>
+		<span>
+			{openAlerts.length} alert{openAlerts.length === 1 ? '' : 's'} currently firing —
+			{openAlerts.map(a => a.metric).join(', ')}
+		</span>
+		<a href="/alerts" class="alert-link">View alerts →</a>
+	</div>
+{/if}
+
+{#if hostStatus === 'offline'}
+	<div class="stale-banner stale-offline">
+		Host appears offline — last seen <span title={absTime(host?.last_seen ?? '')}>{relTime(host?.last_seen ?? '')}</span>. Data may be outdated.
+	</div>
+{:else if hostStatus === 'stale'}
+	<div class="stale-banner stale-warn">
+		Data may be stale — last seen <span title={absTime(host?.last_seen ?? '')}>{relTime(host?.last_seen ?? '')}</span>.
+	</div>
+{/if}
 
 {#if error}
 	<div class="card err">Error: {error}</div>
@@ -251,7 +291,7 @@
 			<div class="label">Uptime</div>
 			<div class="big">{formatDuration(latest.uptime_secs)}</div>
 			{#if host}
-				<div class="muted mono small">seen {relTime(host.last_seen)}</div>
+				<div class="muted mono small" title={absTime(host.last_seen)}>seen {relTime(host.last_seen)}</div>
 			{/if}
 		</div>
 	</div>
@@ -520,7 +560,7 @@
 		gap: 12px;
 	}
 	.back { font-size: 12px; color: var(--text-dim); }
-	h1 { margin: 4px 0; font-size: 22px; font-weight: 600; }
+	h1 { margin: 4px 0; font-size: 22px; font-weight: 600; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 	.small { font-size: 11px; }
 	.range-picker { display: flex; gap: 4px; align-self: flex-start; margin-top: 4px; }
 	.range-picker button.active {
@@ -528,6 +568,41 @@
 		border-color: var(--accent);
 		color: var(--accent);
 	}
+
+	.status-pill {
+		display: inline-block;
+		padding: 2px 9px;
+		border-radius: 999px;
+		font-size: 11px;
+		font-weight: 500;
+	}
+	.status-stale   { background: rgba(255,203,107,0.12); color: var(--warn); border: 1px solid rgba(255,203,107,0.35); }
+	.status-offline { background: rgba(255,107,107,0.12); color: var(--bad);  border: 1px solid rgba(255,107,107,0.35); }
+
+	.alert-banner {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 10px 16px;
+		margin-bottom: 14px;
+		background: rgba(255,107,107,0.08);
+		border: 1px solid rgba(255,107,107,0.35);
+		border-radius: 7px;
+		font-size: 13px;
+		color: var(--bad);
+	}
+	.alert-icon { font-size: 14px; flex-shrink: 0; }
+	.alert-link { margin-left: auto; font-size: 12px; color: var(--bad); opacity: 0.8; }
+	.alert-link:hover { opacity: 1; }
+
+	.stale-banner {
+		padding: 8px 16px;
+		margin-bottom: 14px;
+		border-radius: 7px;
+		font-size: 12px;
+	}
+	.stale-warn    { background: rgba(255,203,107,0.08); border: 1px solid rgba(255,203,107,0.3); color: var(--warn); }
+	.stale-offline { background: rgba(255,107,107,0.08); border: 1px solid rgba(255,107,107,0.3); color: var(--bad); }
 
 	/* Sub-navigation */
 	.subnav {
