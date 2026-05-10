@@ -239,6 +239,35 @@ export interface Container {
 	net_tx_bytes: number;
 }
 
+export interface NetworkContainer {
+	id: string;
+	name: string;
+	endpoint_id: string;
+	mac_address: string;
+	ipv4_address: string;
+	ipv6_address: string;
+}
+
+export interface DockerNetwork {
+	host_id: string;
+	id: string;
+	name: string;
+	driver: string;
+	scope: string;
+	subnet?: string;
+	gateway?: string;
+	internal: boolean;
+	labels: Record<string, string>;
+	containers?: NetworkContainer[];
+}
+
+export interface NetworkCreateSpec {
+	name: string;
+	driver?: string;
+	internal: boolean;
+	labels?: Record<string, string>;
+}
+
 export interface ComposeService {
 	name: string;
 	container_id?: string;

@@ -464,6 +464,25 @@ Phase 2: Compose-First Workflow — full docker-compose stack management directl
 - **`web/src/lib/types.ts`** — `ComposeStack` and `ComposeService` interfaces.
 - **`web/src/lib/api.ts`** — `composeStacks`, `composeStack`, `composeAction`, `composeLogs`, `composeFile`, `composeWriteFile`, `createComposeStack`, `deleteComposeStack`.
 
+## [0.3.0-alpha.2] — 2026-05-10
+
+Phase 3 kickoff: deep Docker network management.
+
+### Added — Backend
+
+- **`internal/types`** — Added `DockerNetwork`, `NetworkContainer`, and `NetworkCreateSpec` representations for Docker networks.
+- **`internal/dockerctl`** — Added `ListNetworks`, `InspectNetwork`, `CreateNetwork`, `RemoveNetwork`, `ConnectContainer`, and `DisconnectContainer` wrappers over the Docker SDK.
+- **`internal/hub`** — `DockerProvider` expanded with the 6 new network methods.
+- **`internal/hub/agentws.go`** — `agentDockerProvider` now correctly forwards network method requests to connected remote agents via WebSocket.
+- **`cmd/agent/main.go`** — Remote agents successfully dispatch `list_networks`, `inspect_network`, `create_network`, `remove_network`, `connect_network`, and `disconnect_network` action types.
+- **`internal/api/api.go`** — New REST routes added under `/api/hosts/{id}/networks/` mirroring the network operations.
+
+### Added — Frontend
+
+- **`web/src/lib/types.ts`** — Typescript interfaces for the new Go network types.
+- **`web/src/lib/api.ts`** — New wrapper functions for the backend network management endpoints.
+- **`web/src/routes/hosts/[id]/networks/+page.svelte`** — Replaced the placeholder with a functional management page. Includes a list view with inline deep-inspection of networks, visualization of connected containers, removal of networks, and a modal for creating new ones. Connect and disconnect functions integrated directly into the inspect view.
+
 ## [Unreleased]
 
-Phase 2 (Compose-First Workflow) is complete. Next: Phase 3 — deeper Docker surface (images, networks, volumes) or Phase 2b compose extensions (stack-level alerts, template library).
+Phase 3 continues: Deep Docker surface — Volumes and Images next.

@@ -29,7 +29,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 )
 
-const agentVersion = "0.2.0-alpha.4"
+const agentVersion = "0.3.0-alpha.2"
 
 // ── wire frame types (must match hub/agentws.go) ────────────────────────────
 
@@ -468,6 +468,60 @@ func dispatchDocker(ctx context.Context, dc *dockerctl.Client, req dockerReqFram
 			return nil, fmt.Errorf("unmarshal update_resources: %w", err)
 		}
 		if err := dc.UpdateResources(ctx, req.CID, update); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]bool{"ok": true})
+
+	case "list_networks":
+		nets, err := dc.ListNetworks(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if nets == nil {
+			nets = []types.DockerNetwork{}
+		}
+		return json.Marshal(nets)
+
+	case "inspect_network":
+		n, err := dc.InspectNetwork(ctx, req.CID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(n)
+
+	case "create_network":
+		var spec types.NetworkCreateSpec
+		if err := json.Unmarshal(req.Params, &spec); err != nil {
+			return nil, fmt.Errorf("unmarshal create network spec: %w", err)
+		}
+		id, err := dc.CreateNetwork(ctx, spec)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]string{"id": id})
+
+	case "remove_network":
+		if err := dc.RemoveNetwork(ctx, req.CID); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]bool{"ok": true})
+
+	case "connect_network":
+		var p struct {
+			ContainerID string `json:"container_id"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		if err := dc.ConnectContainer(ctx, req.CID, p.ContainerID); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]bool{"ok": true})
+
+	case "disconnect_network":
+		var p struct {
+			ContainerID string `json:"container_id"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		if err := dc.DisconnectContainer(ctx, req.CID, p.ContainerID); err != nil {
 			return nil, err
 		}
 		return json.Marshal(map[string]bool{"ok": true})

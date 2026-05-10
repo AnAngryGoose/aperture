@@ -39,6 +39,9 @@ Shared data types used across all backend packages and mirrored to TypeScript in
 | `ContainerInspect` | Full container detail for the deep-inspect panel: all fields from `Container` plus timestamps (`CreatedAt`, `StartedAt *time.Time`, `FinishedAt *time.Time`), restart policy, entrypoint, cmd, env, ports, mounts (`ContainerMount`), labels, live CPU/mem/net stats, and editable resource limits (`NanoCPUs`, `MemLimitBytes`). Sourced from `dockerctl.Inspect`, not the list endpoint. |
 | `ContainerMount` | One bind/volume/tmpfs mount: type, source, destination, mode, and rw flag. Maps Docker SDK's `types.MountPoint`. |
 | `ResourceUpdate` | Live resource-limit patch: `NanoCPUs *int64` and `MemoryBytes *int64`. Pointer fields so `0` means "unlimited" and `nil` means "don't change". Sent as the body to `PUT .../resources`. |
+| `DockerNetwork` | One docker network: ID, Name, Driver, Scope, Internal, IPAM configs, and Labels. |
+| `NetworkContainer` | Sub-type representing a container connected to a network. |
+| `NetworkCreateSpec` | Surface-layer network-create request: Name, Driver, Internal, Attachable, IPAM config, and Labels. |
 
 ### `internal/store`
 
@@ -114,6 +117,7 @@ Docker engine wrapper. Bound to a specific `host_id` at construction so multi-ho
 | `inspectToSpec(inspect)` | (in `internal/api`) Converts a `ContainerInspect` into a `CreateSpec` for the recreate flow. Strips the leading `/` from docker's name format, converts `env []string` back to a `map[string]string`, maps `PortMapping` to `CreatePortBinding`, and maps `ContainerMount` to `VolumeBinding`. **Why:** keeping the translation in the API layer (not dockerctl) means dockerctl stays decoupled from the create-side types. |
 | `FilterRunning(in)` | Helper for callers who want only the running subset. Currently unused by the API but kept because the alerting work (next) needs to scope alerts to running containers. |
 | `FindByName(ctx, name)` | Resolves a container name to an ID via the docker filter API. Used by future container-create flows; still useful enough to keep around. |
+| `ListNetworks(ctx)`, `InspectNetwork(ctx, id)`, `CreateNetwork(ctx, spec)`, `RemoveNetwork(ctx, id)`, `ConnectContainer(ctx, netID, containerID)`, `DisconnectContainer(ctx, netID, containerID)` | Full suite of network management wrappers translating between SDK types and Aperture's surface types. |
 
 ### `internal/alerts`
 
@@ -210,6 +214,7 @@ HTTP layer. chi-based, all routes under `/api`. The same handler can optionally 
 | `containerRemove` | DELETE — separated from `containerAction` because its parameter shape differs (`force`, `volumes` query args) and conceptually it's not a state transition. |
 | `containerLogs` | Returns `text/plain`. Uses `tail` query param (default 200). Renders directly in a modal on the frontend. |
 | `writeJSON`, `writeErr` | Tiny helpers; `writeErr` returns `{error: string}` consistently so the frontend's `api.ts` can extract a message uniformly. |
+| `listNetworks`, `inspectNetwork`, `createNetwork`, `removeNetwork`, `connectNetwork`, `disconnectNetwork` | New routes under `/api/hosts/{id}/networks/` that delegate to `DockerProvider` network methods, supporting list, deep-inspect (with connected containers), creation, removal, and container connection lifecycle. |
 | `parseDuration(s, def)` | `time.ParseDuration` with a default fallback. Why a wrapper: inline `if s == "" || ...` was repeating; this clarifies intent. |
 | `corsForDev` | Allow-lists `localhost`/`127.0.0.1` origins so the SvelteKit dev server can hit the hub during development. In production, same-origin means this is a no-op. Keeping it permanently in the chain (rather than a build flag) avoids the "forgot to enable for dev" trap. |
 | `alertsMetadata` | Returns `{metrics, ops}` from the alerts package's canonical lists. Used by the UI to populate dropdowns so the metric-name vocabulary has a single source of truth. |
@@ -258,7 +263,7 @@ Project at `web/`. Output is a static SPA in `web/build/`, served by the hub at 
 
 ### `src/lib/types.ts`
 
-Hand-mirrored TypeScript versions of the Go `types` package. Manual sync is intentional for v0.1 — codegen will pay off once the type list grows beyond a half-page or once a third client appears. Includes `AlertRule`, `AlertEvent`, `AlertMetadata`, `CreateSpec`, `CreatePortBinding`, `CreateVolumeBinding`, and the rich live-metric types: `NetInterfaceSample`, `DiskMountSample`, `DiskIOSample`, `TempSample`, `ProcessSample`. Also `ContainerMount`, `ContainerInspect`, `ResourceUpdate` for the deep-inspect and resource-edit flows. History response types: `NetIfaceSeries`/`NetIfaceHistory`, `DiskMountSeries`/`DiskMountHistory`, `DiskIOSeries`/`DiskIOHistory`. `MetricSample` carries the optional rich live fields matching the Go type (`cpu_per_core?`, `net_interfaces?`, `disk_mounts?`, `disk_io?`, `temps?`, `mem_avail?`, `mem_cached?`, `processes?`). Note: `CreatePortBinding` and `CreateVolumeBinding` are deliberately separate from the read-side `PortMapping` because create is asymmetric (we *send* a binding spec, not echo a docker snapshot).
+Hand-mirrored TypeScript versions of the Go `types` package. Manual sync is intentional for v0.1 — codegen will pay off once the type list grows beyond a half-page or once a third client appears. Includes `AlertRule`, `AlertEvent`, `AlertMetadata`, `CreateSpec`, `CreatePortBinding`, `CreateVolumeBinding`, and the rich live-metric types: `NetInterfaceSample`, `DiskMountSample`, `DiskIOSample`, `TempSample`, `ProcessSample`. Also `ContainerMount`, `ContainerInspect`, `ResourceUpdate` for the deep-inspect and resource-edit flows. History response types: `NetIfaceSeries`/`NetIfaceHistory`, `DiskMountSeries`/`DiskMountHistory`, `DiskIOSeries`/`DiskIOHistory`. `MetricSample` carries the optional rich live fields matching the Go type (`cpu_per_core?`, `net_interfaces?`, `disk_mounts?`, `disk_io?`, `temps?`, `mem_avail?`, `mem_cached?`, `processes?`). Note: `CreatePortBinding` and `CreateVolumeBinding` are deliberately separate from the read-side `PortMapping` because create is asymmetric (we *send* a binding spec, not echo a docker snapshot). Also includes Docker network models (`DockerNetwork`, `NetworkContainer`, `NetworkCreateSpec`).
 
 ### `src/lib/api.ts`
 
@@ -297,7 +302,7 @@ The hub exposes `GET /api/agents/ws`. Agents dial this endpoint with `Authorizat
 
 **`AgentHandler`** (`internal/hub/agentws.go`) manages the session map (`host_id → *agentSession`). On disconnect: docker provider is deregistered, all in-flight `docker_req` pending channels are drained with an "agent disconnected" error (callers unblock immediately).
 
-**`agentDockerProvider`** implements `hub.DockerProvider` by forwarding all 11 methods over the WS. Uses an atomic counter for req_id and a `map[string]chan dockerRespFrame]` pending map. 30s per-command timeout.
+**`agentDockerProvider`** implements `hub.DockerProvider` by forwarding all methods (including the 6 new network methods) over the WS. Uses an atomic counter for req_id and a `map[string]chan dockerRespFrame]` pending map. 30s per-command timeout.
 
 **Agent binary** (`cmd/agent`) uses the same `collector.Local` and `dockerctl` packages as the hub's embedded collector. Reconnects with 2s→60s exponential backoff. Sends heartbeats every 5s independently of the metric interval.
 
@@ -344,7 +349,7 @@ uPlot wrapper. Reasons for choosing uPlot: ~45 KB minified, draws thousands of p
 | `hosts/[id]/+page.svelte` | Host detail. Fetches host, metrics history, latest, net/mount/diskIO history, and open alerts for this host in parallel. **Alert banner** (red) lists firing count + metric names with a link to `/alerts`. **Stale/offline banners** (amber/red) shown when `last_seen` age >= 15s/90s. **Status pill** in h1. Dynamic title (`Aperture — {host.name}`). `absTime` tooltip on relative-time spans. All other monitoring sections unchanged. |
 | `hosts/[id]/containers/+page.svelte` | Container management. Filter controls (all / running / exited / paused), **text search box** (filters by container name and image, case-insensitive, integrated into `filtered()` derived state). Sort controls (Name / State / CPU / Mem). ESC closes logs modal → create modal → inspect panel (priority order) via `<svelte:window onkeydown>`. Dynamic page title includes host name (fetched once on mount). `absTime` tooltip on container age. Inspect panel, logs modal, and create modal otherwise unchanged. |
 | `hosts/[id]/compose/+page.svelte` | **Compose stack management.** Auto-discovers all stacks via `GET /api/hosts/{id}/compose` on mount with 8s auto-refresh. Each stack is a collapsible card: colored status dot, project name + working dir path, `N/N running` service count badge, status pill (running/partial/stopped), four quick-action buttons (▶ Up, ⏹ Down, ↺ Restart, ⬇ Pull), expand chevron. Action stdout appears inline below the card. **Expanded** shows a 3-tab detail panel: **Services** (table: service name, short container ID, state pill, health badge, human-readable status, ports, per-service restart/stop-start/logs actions), **Compose File** (monospace YAML textarea loaded on demand; toolbar: reload, Save, Save + Deploy; dirty indicator when modified), **Logs** (service selector, tail-count selector, Refresh; scrollable pre block). **Down…** button opens a confirm modal with optional --volumes checkbox. **New Stack modal**: directory path, YAML editor pre-filled with a working template, "Start immediately" toggle. 503 from the API (compose not available) shows a styled banner. ESC closes modals; `<svelte:head>` title. |
-| `hosts/[id]/networks/+page.svelte` | Placeholder. Shows "Docker network inspection, creation, and management coming in a future release." Satisfies the sub-nav link so it doesn't 404; implementation is roadmap section 3. |
+| `hosts/[id]/networks/+page.svelte` | Docker network management. Renders a table of networks, a deep-inspect expansion panel (showing config and connected containers), and a "+ New network" modal. Networks can be removed, and containers can be connected or disconnected directly from the inspect view. |
 | `hosts/[id]/volumes/+page.svelte` | Placeholder. Same pattern as networks. |
 | `hosts/[id]/images/+page.svelte` | Placeholder. Same pattern. |
 | `hosts/[id]/logs/+page.svelte` | Placeholder. Notes that container logs are already accessible on the Containers tab. |

@@ -229,6 +229,38 @@ type ContainerInspect struct {
 	MemLimitBytes int64 `json:"mem_limit_bytes"`
 }
 
+// DockerNetwork represents a docker network observed on a host.
+type DockerNetwork struct {
+	HostID     string             `json:"host_id"`
+	ID         string             `json:"id"`
+	Name       string             `json:"name"`
+	Driver     string             `json:"driver"`
+	Scope      string             `json:"scope"`
+	Subnet     string             `json:"subnet,omitempty"`
+	Gateway    string             `json:"gateway,omitempty"`
+	Internal   bool               `json:"internal"`
+	Labels     map[string]string  `json:"labels"`
+	Containers []NetworkContainer `json:"containers,omitempty"` // For inspect
+}
+
+// NetworkContainer is a container connected to a network.
+type NetworkContainer struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	EndpointID  string `json:"endpoint_id"`
+	MacAddress  string `json:"mac_address"`
+	IPv4Address string `json:"ipv4_address"`
+	IPv6Address string `json:"ipv6_address"`
+}
+
+// NetworkCreateSpec is the surface-layer network-create request.
+type NetworkCreateSpec struct {
+	Name     string            `json:"name"`
+	Driver   string            `json:"driver,omitempty"` // default "bridge"
+	Internal bool              `json:"internal"`
+	Labels   map[string]string `json:"labels,omitempty"`
+}
+
 // ResourceUpdate is the body for PUT /api/hosts/{id}/containers/{cid}/resources.
 // nil pointer fields mean "leave unchanged".
 type ResourceUpdate struct {

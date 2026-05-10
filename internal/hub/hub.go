@@ -43,6 +43,12 @@ type DockerProvider interface {
 	Logs(ctx context.Context, id string, tail int) (string, error)
 	Inspect(ctx context.Context, id string) (*types.ContainerInspect, error)
 	UpdateResources(ctx context.Context, id string, update types.ResourceUpdate) error
+	ListNetworks(ctx context.Context) ([]types.DockerNetwork, error)
+	InspectNetwork(ctx context.Context, id string) (*types.DockerNetwork, error)
+	CreateNetwork(ctx context.Context, spec types.NetworkCreateSpec) (string, error)
+	RemoveNetwork(ctx context.Context, id string) error
+	ConnectContainer(ctx context.Context, networkID, containerID string) error
+	DisconnectContainer(ctx context.Context, networkID, containerID string) error
 }
 
 // ComposeProvider abstracts docker compose stack operations for a single host.

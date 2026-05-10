@@ -15,7 +15,9 @@ import type {
 	DiskIOHistory,
 	AgentToken,
 	ComposeStack,
-	ComposeService
+	ComposeService,
+	DockerNetwork,
+	NetworkCreateSpec
 } from './types';
 
 // In dev, the SvelteKit dev server runs on :5173 and the Go hub on :8080.
@@ -96,6 +98,18 @@ export const api = {
 		if (!res.ok) throw new Error(`logs -> ${res.status}`);
 		return res.text();
 	},
+
+	networks: (id: string) => get<DockerNetwork[]>(`/api/hosts/${id}/networks`),
+	networkInspect: (hostID: string, netID: string) =>
+		get<DockerNetwork>(`/api/hosts/${hostID}/networks/${netID}`),
+	createNetwork: (hostID: string, spec: NetworkCreateSpec) =>
+		send<{ id: string }>(`/api/hosts/${hostID}/networks`, 'POST', spec),
+	removeNetwork: (hostID: string, netID: string) =>
+		del(`/api/hosts/${hostID}/networks/${netID}`),
+	connectNetwork: (hostID: string, netID: string, containerID: string) =>
+		send<{ ok: boolean }>(`/api/hosts/${hostID}/networks/${netID}/connect`, 'POST', { container_id: containerID }),
+	disconnectNetwork: (hostID: string, netID: string, containerID: string) =>
+		send<{ ok: boolean }>(`/api/hosts/${hostID}/networks/${netID}/disconnect`, 'POST', { container_id: containerID }),
 
 	alertMetadata: () => get<AlertMetadata>('/api/alerts/metadata'),
 	alertRules: (hostID?: string) =>

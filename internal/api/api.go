@@ -83,6 +83,14 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
 		r.Delete("/hosts/{id}/containers/{cid}", s.containerRemove)
 
+		// Network management.
+		r.Get("/hosts/{id}/networks", s.listNetworks)
+		r.Post("/hosts/{id}/networks", s.createNetwork)
+		r.Get("/hosts/{id}/networks/{net_id}", s.inspectNetwork)
+		r.Delete("/hosts/{id}/networks/{net_id}", s.removeNetwork)
+		r.Post("/hosts/{id}/networks/{net_id}/connect", s.connectNetwork)
+		r.Post("/hosts/{id}/networks/{net_id}/disconnect", s.disconnectNetwork)
+
 		// Compose stack management. Specific sub-routes registered before /{action}.
 		r.Get("/hosts/{id}/compose", s.listCompose)
 		r.Post("/hosts/{id}/compose", s.createCompose)
@@ -535,6 +543,121 @@ func (s *Server) containerLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(logs))
+}
+
+// --- networks ---
+
+func (s *Server) listNetworks(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	nets, err := d.ListNetworks(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	if nets == nil {
+		nets = []types.DockerNetwork{}
+	}
+	writeJSON(w, http.StatusOK, nets)
+}
+
+func (s *Server) inspectNetwork(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	netID := chi.URLParam(r, "net_id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	n, err := d.InspectNetwork(r.Context(), netID)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, n)
+}
+
+func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	var spec types.NetworkCreateSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	netID, err := d.CreateNetwork(r.Context(), spec)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": netID})
+}
+
+func (s *Server) removeNetwork(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	netID := chi.URLParam(r, "net_id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	if err := d.RemoveNetwork(r.Context(), netID); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) connectNetwork(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	netID := chi.URLParam(r, "net_id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	var p struct {
+		ContainerID string `json:"container_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.ConnectContainer(r.Context(), netID, p.ContainerID); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) disconnectNetwork(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	netID := chi.URLParam(r, "net_id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	var p struct {
+		ContainerID string `json:"container_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.DisconnectContainer(r.Context(), netID, p.ContainerID); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // --- alerts ---

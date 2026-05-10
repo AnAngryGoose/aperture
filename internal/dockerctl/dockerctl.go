@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 )
@@ -480,4 +481,96 @@ func (c *Client) FindByName(ctx context.Context, name string) (string, error) {
 		return "", ErrNoMatch
 	}
 	return cs[0].ID, nil
+}
+
+// --- Network actions ---
+
+func (c *Client) ListNetworks(ctx context.Context) ([]types.DockerNetwork, error) {
+	nets, err := c.cli.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]types.DockerNetwork, 0, len(nets))
+	for _, n := range nets {
+		var subnet, gateway string
+		if len(n.IPAM.Config) > 0 {
+			subnet = n.IPAM.Config[0].Subnet
+			gateway = n.IPAM.Config[0].Gateway
+		}
+		out = append(out, types.DockerNetwork{
+			HostID:   c.hostID,
+			ID:       n.ID,
+			Name:     n.Name,
+			Driver:   n.Driver,
+			Scope:    n.Scope,
+			Subnet:   subnet,
+			Gateway:  gateway,
+			Internal: n.Internal,
+			Labels:   n.Labels,
+		})
+	}
+	return out, nil
+}
+
+func (c *Client) InspectNetwork(ctx context.Context, id string) (*types.DockerNetwork, error) {
+	n, err := c.cli.NetworkInspect(ctx, id, network.InspectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var subnet, gateway string
+	if len(n.IPAM.Config) > 0 {
+		subnet = n.IPAM.Config[0].Subnet
+		gateway = n.IPAM.Config[0].Gateway
+	}
+	var containers []types.NetworkContainer
+	for cid, ep := range n.Containers {
+		containers = append(containers, types.NetworkContainer{
+			ID:          cid,
+			Name:        strings.TrimPrefix(ep.Name, "/"),
+			EndpointID:  ep.EndpointID,
+			MacAddress:  ep.MacAddress,
+			IPv4Address: ep.IPv4Address,
+			IPv6Address: ep.IPv6Address,
+		})
+	}
+	return &types.DockerNetwork{
+		HostID:     c.hostID,
+		ID:         n.ID,
+		Name:       n.Name,
+		Driver:     n.Driver,
+		Scope:      n.Scope,
+		Subnet:     subnet,
+		Gateway:    gateway,
+		Internal:   n.Internal,
+		Labels:     n.Labels,
+		Containers: containers,
+	}, nil
+}
+
+func (c *Client) CreateNetwork(ctx context.Context, spec types.NetworkCreateSpec) (string, error) {
+	if strings.TrimSpace(spec.Name) == "" {
+		return "", errors.New("network name is required")
+	}
+	opts := network.CreateOptions{
+		Driver:   spec.Driver,
+		Internal: spec.Internal,
+		Labels:   spec.Labels,
+	}
+	resp, err := c.cli.NetworkCreate(ctx, spec.Name, opts)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+func (c *Client) RemoveNetwork(ctx context.Context, id string) error {
+	return c.cli.NetworkRemove(ctx, id)
+}
+
+func (c *Client) ConnectContainer(ctx context.Context, networkID, containerID string) error {
+	return c.cli.NetworkConnect(ctx, networkID, containerID, nil)
+}
+
+func (c *Client) DisconnectContainer(ctx context.Context, networkID, containerID string) error {
+	return c.cli.NetworkDisconnect(ctx, networkID, containerID, false)
 }

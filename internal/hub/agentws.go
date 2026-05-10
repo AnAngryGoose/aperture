@@ -498,6 +498,62 @@ func (p *agentDockerProvider) UpdateResources(ctx context.Context, id string, up
 	return err
 }
 
+func (p *agentDockerProvider) ListNetworks(ctx context.Context) ([]types.DockerNetwork, error) {
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "list_networks", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out []types.DockerNetwork
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (p *agentDockerProvider) InspectNetwork(ctx context.Context, id string) (*types.DockerNetwork, error) {
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "inspect_network", id, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out types.DockerNetwork
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (p *agentDockerProvider) CreateNetwork(ctx context.Context, spec types.NetworkCreateSpec) (string, error) {
+	params := marshalParams(spec)
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "create_network", "", params)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+func (p *agentDockerProvider) RemoveNetwork(ctx context.Context, id string) error {
+	_, err := p.handler.sendDockerCmd(ctx, p.hostID, "remove_network", id, nil)
+	return err
+}
+
+func (p *agentDockerProvider) ConnectContainer(ctx context.Context, networkID, containerID string) error {
+	params := marshalParams(map[string]any{"container_id": containerID})
+	_, err := p.handler.sendDockerCmd(ctx, p.hostID, "connect_network", networkID, params)
+	return err
+}
+
+func (p *agentDockerProvider) DisconnectContainer(ctx context.Context, networkID, containerID string) error {
+	params := marshalParams(map[string]any{"container_id": containerID})
+	_, err := p.handler.sendDockerCmd(ctx, p.hostID, "disconnect_network", networkID, params)
+	return err
+}
+
 // ── agentComposeProvider ─────────────────────────────────────────────────────
 
 // agentComposeProvider implements hub.ComposeProvider by forwarding compose
