@@ -24,19 +24,20 @@ import (
 )
 
 type Server struct {
-	hub       *hub.Hub
-	evaluator *alerts.Evaluator
-	notifier  *alerts.Notifier
-	version   string
-	startedAt time.Time
+	hub          *hub.Hub
+	evaluator    *alerts.Evaluator
+	notifier     *alerts.Notifier
+	agentHandler *hub.AgentHandler
+	version      string
+	startedAt    time.Time
 }
 
 // NewServer builds the HTTP server. version + startedAt are surfaced via
 // /api/system/info; the store's path is read directly from h.Store().Path()
 // at request time so a future runtime DB swap (not currently supported)
 // would Just Work.
-func NewServer(h *hub.Hub, ev *alerts.Evaluator, notifier *alerts.Notifier, version string, startedAt time.Time) *Server {
-	return &Server{hub: h, evaluator: ev, notifier: notifier, version: version, startedAt: startedAt}
+func NewServer(h *hub.Hub, ev *alerts.Evaluator, notifier *alerts.Notifier, agentH *hub.AgentHandler, version string, startedAt time.Time) *Server {
+	return &Server{hub: h, evaluator: ev, notifier: notifier, agentHandler: agentH, version: version, startedAt: startedAt}
 }
 
 // Router builds the chi router. webFS may be nil during early development
@@ -70,6 +71,13 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Post("/hosts/{id}/containers/{cid}/recreate", s.containerRecreate)
 		r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
 		r.Delete("/hosts/{id}/containers/{cid}", s.containerRemove)
+
+		// Agent WebSocket and token management.
+		r.Get("/agents/ws", s.agentHandler.ServeHTTP)
+		r.Get("/agents/tokens", s.listAgentTokens)
+		r.Post("/agents/tokens", s.createAgentToken)
+		r.Delete("/agents/tokens/{id}", s.revokeAgentToken)
+		r.Get("/agents/connected", s.connectedAgents)
 
 		r.Get("/alerts/metadata", s.alertsMetadata)
 		r.Get("/alerts/rules", s.listAlertRules)
@@ -854,6 +862,62 @@ func (s *Server) testAlertChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// --- agent tokens ---
+
+func (s *Server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
+	tokens, err := s.hub.Store().ListAgentTokens(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if tokens == nil {
+		tokens = []types.AgentToken{}
+	}
+	writeJSON(w, http.StatusOK, tokens)
+}
+
+func (s *Server) createAgentToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if body.Name == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("name is required"))
+		return
+	}
+	tok, err := s.hub.Store().CreateAgentToken(r.Context(), body.Name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	// 201 Created; the plaintext token is in the response body only this once.
+	writeJSON(w, http.StatusCreated, tok)
+}
+
+func (s *Server) revokeAgentToken(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.hub.Store().RevokeAgentToken(r.Context(), id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) connectedAgents(w http.ResponseWriter, r *http.Request) {
+	ids := s.agentHandler.ConnectedAgents()
+	if ids == nil {
+		ids = []string{}
+	}
+	writeJSON(w, http.StatusOK, ids)
 }
 
 // --- helpers ---

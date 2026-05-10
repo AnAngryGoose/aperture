@@ -14,7 +14,18 @@ export interface Host {
 	mem_total: number;
 	created_at: string;
 	last_seen: string;
-	source: string;
+	source: string;       // "local" | "agent"
+	agent_version?: string;
+}
+
+export interface AgentToken {
+	id: number;
+	name: string;
+	created_at: string;
+	last_used?: string | null;
+	revoked: boolean;
+	// Only populated on creation — never stored or returned again.
+	token?: string;
 }
 
 export interface NetInterfaceSample {

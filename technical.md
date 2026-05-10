@@ -260,6 +260,39 @@ Alert-related methods: `alertMetadata`, `alertRules(hostID?)`, `createAlertRule(
 
 `formatBytes`, `formatPct`, `formatDuration`, `relTime`, `absTime`, `formatBytesRate`. All defensive against `NaN` / `Infinity` because samples can be sparse (e.g. before the first reading) and we don't want `NaN%` in the UI. `formatDuration` includes seconds for durations under one minute. `absTime` returns a locale-formatted absolute timestamp string used in `title` attributes so every `relTime(...)` span shows the full date/time on hover. `formatBytesRate` auto-scales bytes/s → KiB/s → MiB/s → GiB/s.
 
+### `src/lib/types.ts` — `AgentToken`
+
+`AgentToken { id, name, created_at, last_used?, revoked, token? }`. The `token` field is only populated on creation (the server never stores or re-returns the plaintext). The UI renders it once in the wizard's copy-command step.
+
+### Agent transport
+
+The hub exposes `GET /api/agents/ws`. Agents dial this endpoint with `Authorization: Bearer <token>` on the HTTP upgrade request. The token is verified against the `agent_tokens` table (SHA-256 hash comparison); on mismatch the upgrade is rejected with 401.
+
+**WS frame protocol** (JSON, framed by coder/websocket):
+
+| Direction | Frame type | Purpose |
+|---|---|---|
+| Agent → Hub | `hello` | HostInfo + version + has_docker; must be first frame (10s timeout) |
+| Hub → Agent | `ack` | Confirms host_id assigned |
+| Agent → Hub | `metric` | One MetricSample per interval |
+| Agent → Hub | `heartbeat` | Every 5s; hub calls TouchHost |
+| Hub → Agent | `docker_req` | Docker operation (action, cid, params JSON) |
+| Agent → Hub | `docker_resp` | Result of docker operation (ok, data, error) |
+
+**`AgentHandler`** (`internal/hub/agentws.go`) manages the session map (`host_id → *agentSession`). On disconnect: docker provider is deregistered, all in-flight `docker_req` pending channels are drained with an "agent disconnected" error (callers unblock immediately).
+
+**`agentDockerProvider`** implements `hub.DockerProvider` by forwarding all 11 methods over the WS. Uses an atomic counter for req_id and a `map[string]chan dockerRespFrame]` pending map. 30s per-command timeout.
+
+**Agent binary** (`cmd/agent`) uses the same `collector.Local` and `dockerctl` packages as the hub's embedded collector. Reconnects with 2s→60s exponential backoff. Sends heartbeats every 5s independently of the metric interval.
+
+### Agent onboarding flow
+
+1. User navigates to Settings (nav link in header).
+2. Clicks "+ Add agent" → two-step wizard:
+   - Step 1: name (e.g. `nas-box`) → Generate Token → API `POST /api/agents/tokens`
+   - Step 2: ready-to-paste command in a code block. Tab toggle: binary vs Docker variant. `window.location.origin` is used as the hub URL. Copy button. One-time token warning banner.
+3. Token is shown once and never retrievable again. Revoke button in the token table cuts off the agent.
+
 ### `src/lib/toast.ts` + `src/lib/Toast.svelte`
 
 Global toast notification system. `toast.ts` is a Svelte writable store of `{ id, message, kind }` records. Three helpers — `toast.info`, `toast.success`, `toast.error` — push a toast and schedule auto-dismiss (4s for info/success, 6s for errors). `Toast.svelte` is a fixed-position stack (bottom-right, `z-index: 1000`) with a slide-in animation and a per-toast dismiss button. It is mounted once in `+layout.svelte` so any page can call `toast.*` without re-mounting the component. Replaces bare `alert()` / `confirm()` calls in container management actions.

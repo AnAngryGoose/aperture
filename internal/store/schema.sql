@@ -113,3 +113,15 @@ CREATE TABLE IF NOT EXISTS disk_io_metrics (
     PRIMARY KEY (host_id, ts, device)
 );
 CREATE INDEX IF NOT EXISTS idx_disk_io_metrics_host_ts ON disk_io_metrics(host_id, ts DESC);
+
+-- Agent tokens: pre-shared secrets that remote agents use to authenticate
+-- the WebSocket upgrade. The plaintext token is never stored; only the
+-- SHA-256 hex digest is kept.
+CREATE TABLE IF NOT EXISTS agent_tokens (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,  -- SHA-256 hex of plaintext token
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used  TIMESTAMP,
+    revoked    INTEGER NOT NULL DEFAULT 0
+);

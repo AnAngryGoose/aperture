@@ -76,7 +76,10 @@
 
 <div class="page-header">
 	<h1>Hosts</h1>
-	<span class="muted">{hosts.length} host{hosts.length === 1 ? '' : 's'} · auto-refresh 5s</span>
+	<div class="header-right">
+		<span class="muted">{hosts.length} host{hosts.length === 1 ? '' : 's'} · auto-refresh 5s</span>
+		<a href="/settings" class="add-agent-btn">+ Add agent</a>
+	</div>
 </div>
 
 {#if error}
@@ -106,6 +109,9 @@
 					<div class="head-left">
 						<div class="name-row">
 							<div class="name">{h.name}</div>
+							{#if h.source === 'agent'}
+								<span class="source-badge" title="Remote agent{h.agent_version ? ` v${h.agent_version}` : ''}">agent</span>
+							{/if}
 							{#if alertCount > 0}
 								<span class="alert-badge" title="{alertCount} alert{alertCount === 1 ? '' : 's'} currently firing">
 									⚠ {alertCount}
@@ -159,10 +165,24 @@
 <style>
 	.page-header {
 		display: flex;
-		align-items: baseline;
+		align-items: center;
 		justify-content: space-between;
 		margin-bottom: 16px;
 	}
+	.header-right { display: flex; align-items: center; gap: 12px; }
+	.add-agent-btn {
+		font-size: 12px;
+		padding: 4px 12px;
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		color: var(--text-dim);
+		background: var(--bg-elev);
+		cursor: pointer;
+		text-decoration: none;
+		white-space: nowrap;
+		transition: border-color 0.15s, color 0.15s;
+	}
+	.add-agent-btn:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
 	h1 { margin: 0; font-size: 20px; font-weight: 600; }
 	.host-link { display: block; color: inherit; }
 	.host-link:hover { text-decoration: none; }
@@ -184,6 +204,17 @@
 	.name { font-weight: 600; font-size: 15px; }
 	.small { font-size: 11px; }
 
+	.source-badge {
+		background: rgba(92, 200, 255, 0.1);
+		color: var(--accent);
+		border: 1px solid rgba(92, 200, 255, 0.3);
+		border-radius: 4px;
+		padding: 1px 6px;
+		font-size: 10px;
+		font-weight: 500;
+		white-space: nowrap;
+		letter-spacing: 0.03em;
+	}
 	.alert-badge {
 		background: rgba(255, 107, 107, 0.15);
 		color: var(--bad);

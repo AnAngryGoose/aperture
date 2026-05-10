@@ -28,7 +28,7 @@ import (
 
 // Version identifies the running binary. Bump alongside changelog entries.
 // Surfaced via /api/system/info and the layout footer.
-const Version = "0.2.0-alpha.2"
+const Version = "0.2.0-alpha.4"
 
 func main() {
 	var (
@@ -95,6 +95,8 @@ func main() {
 		log.Info("docker provider registered", "host_id", hostID)
 	}
 
+	agentH := hub.NewAgentHandler(h, st, log)
+
 	var webFS fs.FS
 	if *webDir != "" {
 		if _, err := os.Stat(*webDir); err != nil {
@@ -106,7 +108,7 @@ func main() {
 	}
 	srv := &http.Server{
 		Addr:              *listenAddr,
-		Handler:           api.NewServer(h, ev, notif, Version, startedAt).Router(webFS),
+		Handler:           api.NewServer(h, ev, notif, agentH, Version, startedAt).Router(webFS),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

@@ -196,6 +196,9 @@
 		{#if host}
 			<div class="muted mono">
 				{host.platform || host.os} · {host.arch} · {host.cpu_count} vCPU · {formatBytes(host.mem_total)} RAM
+				{#if host.source === 'agent'}
+					· <span class="source-tag">agent{host.agent_version ? ` v${host.agent_version}` : ''}</span>
+				{/if}
 			</div>
 			{#if host.cpu_model}
 				<div class="muted mono small">{host.cpu_model}</div>
@@ -561,6 +564,7 @@
 	}
 	.back { font-size: 12px; color: var(--text-dim); }
 	h1 { margin: 4px 0; font-size: 22px; font-weight: 600; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+	.source-tag { color: var(--accent); font-size: 11px; }
 	.small { font-size: 11px; }
 	.range-picker { display: flex; gap: 4px; align-self: flex-start; margin-top: 4px; }
 	.range-picker button.active {

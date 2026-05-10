@@ -64,6 +64,7 @@
 				<span class="badge">{firing}</span>
 			{/if}
 		</a>
+		<a href="/settings" class:active={page.url.pathname.startsWith('/settings')}>Settings</a>
 	</nav>
 </header>
 

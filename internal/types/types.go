@@ -2,6 +2,19 @@ package types
 
 import "time"
 
+// AgentToken represents a pre-shared secret used by remote agents to
+// authenticate the WebSocket upgrade. The plaintext is only returned once
+// (on creation); thereafter only the SHA-256 hash is stored.
+type AgentToken struct {
+	ID        int64      `json:"id"`
+	Name      string     `json:"name"`
+	CreatedAt time.Time  `json:"created_at"`
+	LastUsed  *time.Time `json:"last_used,omitempty"`
+	Revoked   bool       `json:"revoked"`
+	// Token is only populated on creation — the plaintext is never stored.
+	Token string `json:"token,omitempty"`
+}
+
 // Host is a machine that aperture knows about. In v0.1 the only host is the
 // local one (auto-registered at startup), but the data model is multi-host
 // from day 1.
@@ -19,7 +32,8 @@ type Host struct {
 	LastSeen  time.Time `json:"last_seen"`
 	// Source describes where this host's metrics come from. "local" means the
 	// hub process collects them in-process. Future values: "agent" (remote push).
-	Source string `json:"source"`
+	Source       string `json:"source"`
+	AgentVersion string `json:"agent_version,omitempty"`
 }
 
 // --- Rich metric sub-types ---

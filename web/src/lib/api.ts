@@ -12,7 +12,8 @@ import type {
 	SystemInfo,
 	NetIfaceHistory,
 	DiskMountHistory,
-	DiskIOHistory
+	DiskIOHistory,
+	AgentToken
 } from './types';
 
 // In dev, the SvelteKit dev server runs on :5173 and the Go hub on :8080.
@@ -118,5 +119,11 @@ export const api = {
 		send<AlertChannel>(`/api/alerts/channels/${id}`, 'PUT', ch),
 	deleteAlertChannel: (id: number) => del(`/api/alerts/channels/${id}`),
 	testAlertChannel: (id: number) =>
-		send<{ ok: boolean }>(`/api/alerts/channels/${id}/test`, 'POST', {})
+		send<{ ok: boolean }>(`/api/alerts/channels/${id}/test`, 'POST', {}),
+
+	agentTokens: () => get<AgentToken[]>('/api/agents/tokens'),
+	createAgentToken: (name: string) =>
+		send<AgentToken>('/api/agents/tokens', 'POST', { name }),
+	revokeAgentToken: (id: number) => del(`/api/agents/tokens/${id}`),
+	connectedAgents: () => get<string[]>('/api/agents/connected')
 };

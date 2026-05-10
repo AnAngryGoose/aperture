@@ -344,6 +344,39 @@ Chart UX improvements and extensible alert notification channels (roadmap sectio
 
 ---
 
+## [0.2.0-alpha.5] — 2026-05-09
+
+Phase 1 complete: remote agent transport, token auth, and agent onboarding UI.
+
+### Added — Remote agent transport
+
+- **`github.com/coder/websocket`** — added as the WebSocket library (pure-Go, no CGO).
+- **`internal/store/schema.sql`** — new `agent_tokens` table (`id`, `name`, `token_hash UNIQUE`, `created_at`, `last_used`, `revoked`). `hosts` gains an `agent_version` column.
+- **`internal/store/store.go`** — token CRUD: `CreateAgentToken` (generates 32-byte random token, stores SHA-256 hash, returns plaintext once), `ListAgentTokens`, `RevokeAgentToken`, `VerifyAgentToken` (hash comparison + last_used update). `UpsertHost`, `ListHosts`, `GetHost` updated to include `agent_version`.
+- **`internal/types/types.go`** — `AgentToken` struct; `Host.AgentVersion` field.
+- **`internal/hub/agentws.go`** (NEW) — `AgentHandler`: manages all active agent WebSocket sessions. `ServeHTTP`: token auth (Bearer header) → WebSocket upgrade → hello handshake (10s timeout) → host upsert → ack frame → metric/heartbeat/docker_resp receive loop → deregister on disconnect. `agentDockerProvider`: implements `hub.DockerProvider` by forwarding all 11 methods (list, inspect, start, stop, restart, pause, unpause, kill, remove, logs, update_resources, create) over the WS via a pending-channel request/response pattern with 30s timeout. Disconnected sessions drain all pending requests with a clear "agent disconnected" error so API callers don't hang.
+- **`cmd/agent/main.go`** — full agent implementation. Flags: `--hub` (required, e.g. `http://hub-ip:8080`), `--token` (required), `--name` (override hostname), `--interval` (default 5s), `--disk` (disk path to monitor, default `/`), `--no-docker`. Uses the same `collector.Local` and `dockerctl` packages as the hub's local collector. Reconnects with exponential backoff (2s → 60s). Heartbeat every 5s. Dispatches hub docker_req frames to local docker and sends docker_resp frames back.
+- **`internal/api/api.go`** — `Server` gains `agentHandler *hub.AgentHandler`. `NewServer` accepts it. New routes: `GET /api/agents/ws` (WS upgrade, handled by AgentHandler), `GET /api/agents/tokens`, `POST /api/agents/tokens`, `DELETE /api/agents/tokens/{id}`, `GET /api/agents/connected`.
+- **`cmd/hub/main.go`** — constructs `hub.NewAgentHandler(h, st, log)` and passes it to `api.NewServer`. Version bumped to `0.2.0-alpha.4`.
+
+### Added — Agent onboarding UI
+
+- **`web/src/routes/settings/+page.svelte`** (NEW) — Settings page. Token management table (name, created, last used, revoke). Empty state with contextual help. "+ Add agent" button opens a two-step wizard:
+  - Step 1: enter a name (e.g. `nas-box`) → Generate Token
+  - Step 2: copy-ready command shown in a code block with tab toggle between Binary and Docker variants. Hub URL auto-detected from `window.location.origin`. One-time token warning banner. Clipboard copy button with confirmation feedback. ESC closes.
+- **`web/src/routes/+layout.svelte`** — Settings nav link added.
+- **`web/src/routes/+page.svelte`** — "+ Add agent" button in dashboard header links to Settings. Agent host cards get a subtle cyan `agent` source badge in the name row (with hover tooltip showing agent version). Badge CSS added.
+- **`web/src/routes/hosts/[id]/+page.svelte`** — Agent version shown inline in the host platform/arch row when `source === 'agent'`.
+- **`web/src/lib/types.ts`** — `AgentToken` interface; `Host.agent_version` optional field.
+- **`web/src/lib/api.ts`** — `agentTokens`, `createAgentToken`, `revokeAgentToken`, `connectedAgents` methods.
+
+### Verified
+
+- `go build ./... && go vet ./...` — clean.
+- `npm run build` — clean.
+
+---
+
 ## [0.2.0-alpha.4] — 2026-05-09
 
 UI/UX quality-of-life pass across all pages.
@@ -391,4 +424,4 @@ UI/UX quality-of-life pass across all pages.
 
 ## [Unreleased]
 
-Roadmap section 1 continues. Remaining items: agent ↔ hub transport (mTLS/token), agent auto-reconnect and heartbeats.
+Phase 1 (Solidify the Core) is complete. Next: Phase 2 — Compose-First Workflow (discover and manage docker-compose stacks from the UI).

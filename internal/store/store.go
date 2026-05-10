@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -36,6 +39,7 @@ func Open(path string) (*Store, error) {
 	// Idempotent migrations for columns added after the initial schema.
 	migrations := []string{
 		`ALTER TABLE alert_rules ADD COLUMN severity TEXT NOT NULL DEFAULT 'warning'`,
+		`ALTER TABLE hosts ADD COLUMN agent_version TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
@@ -54,8 +58,8 @@ func (s *Store) Path() string { return s.path }
 // UpsertHost inserts or updates a host record and bumps last_seen.
 func (s *Store) UpsertHost(ctx context.Context, h types.Host) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO hosts (id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, created_at, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO hosts (id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, agent_version, created_at, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			os = excluded.os,
@@ -66,8 +70,9 @@ func (s *Store) UpsertHost(ctx context.Context, h types.Host) error {
 			cpu_count = excluded.cpu_count,
 			mem_total = excluded.mem_total,
 			source = excluded.source,
+			agent_version = excluded.agent_version,
 			last_seen = excluded.last_seen
-	`, h.ID, h.Name, h.OS, h.Platform, h.Kernel, h.Arch, h.CPUModel, h.CPUCount, h.MemTotal, h.Source, h.CreatedAt, h.LastSeen)
+	`, h.ID, h.Name, h.OS, h.Platform, h.Kernel, h.Arch, h.CPUModel, h.CPUCount, h.MemTotal, h.Source, h.AgentVersion, h.CreatedAt, h.LastSeen)
 	return err
 }
 
@@ -78,7 +83,7 @@ func (s *Store) TouchHost(ctx context.Context, hostID string, t time.Time) error
 
 func (s *Store) ListHosts(ctx context.Context) ([]types.Host, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, created_at, last_seen
+		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, agent_version, created_at, last_seen
 		FROM hosts ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -88,7 +93,7 @@ func (s *Store) ListHosts(ctx context.Context) ([]types.Host, error) {
 	for rows.Next() {
 		var h types.Host
 		if err := rows.Scan(&h.ID, &h.Name, &h.OS, &h.Platform, &h.Kernel, &h.Arch,
-			&h.CPUModel, &h.CPUCount, &h.MemTotal, &h.Source, &h.CreatedAt, &h.LastSeen); err != nil {
+			&h.CPUModel, &h.CPUCount, &h.MemTotal, &h.Source, &h.AgentVersion, &h.CreatedAt, &h.LastSeen); err != nil {
 			return nil, err
 		}
 		out = append(out, h)
@@ -99,10 +104,10 @@ func (s *Store) ListHosts(ctx context.Context) ([]types.Host, error) {
 func (s *Store) GetHost(ctx context.Context, id string) (*types.Host, error) {
 	var h types.Host
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, created_at, last_seen
+		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, agent_version, created_at, last_seen
 		FROM hosts WHERE id = ?`, id).Scan(
 		&h.ID, &h.Name, &h.OS, &h.Platform, &h.Kernel, &h.Arch,
-		&h.CPUModel, &h.CPUCount, &h.MemTotal, &h.Source, &h.CreatedAt, &h.LastSeen)
+		&h.CPUModel, &h.CPUCount, &h.MemTotal, &h.Source, &h.AgentVersion, &h.CreatedAt, &h.LastSeen)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -871,4 +876,106 @@ func (s *Store) UpdateAlertChannel(ctx context.Context, ch types.AlertChannel) e
 func (s *Store) DeleteAlertChannel(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM alert_channels WHERE id = ?`, id)
 	return err
+}
+
+// --- agent tokens ---
+
+// hashToken returns the hex-encoded SHA-256 digest of the plaintext token.
+func hashToken(plaintext string) string {
+	sum := sha256.Sum256([]byte(plaintext))
+	return hex.EncodeToString(sum[:])
+}
+
+// CreateAgentToken generates a new 32-byte cryptographically random token,
+// stores its SHA-256 hash, and returns the AgentToken with the plaintext
+// Token field set. This is the only time the plaintext is available.
+func (s *Store) CreateAgentToken(ctx context.Context, name string) (types.AgentToken, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return types.AgentToken{}, fmt.Errorf("generate token: %w", err)
+	}
+	plaintext := hex.EncodeToString(raw) // 64 hex chars
+	hash := hashToken(plaintext)
+
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO agent_tokens (name, token_hash) VALUES (?, ?)`, name, hash)
+	if err != nil {
+		return types.AgentToken{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return types.AgentToken{}, err
+	}
+	return types.AgentToken{
+		ID:        id,
+		Name:      name,
+		CreatedAt: time.Now().UTC(),
+		Token:     plaintext,
+	}, nil
+}
+
+// ListAgentTokens returns all non-revoked agent tokens (without plaintext).
+func (s *Store) ListAgentTokens(ctx context.Context) ([]types.AgentToken, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, created_at, last_used, revoked
+		FROM agent_tokens
+		WHERE revoked = 0
+		ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.AgentToken
+	for rows.Next() {
+		var t types.AgentToken
+		var revoked int
+		var lastUsed sql.NullTime
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt, &lastUsed, &revoked); err != nil {
+			return nil, err
+		}
+		t.Revoked = revoked != 0
+		if lastUsed.Valid {
+			lu := lastUsed.Time
+			t.LastUsed = &lu
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RevokeAgentToken sets revoked=1 for the given token id.
+func (s *Store) RevokeAgentToken(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agent_tokens SET revoked = 1 WHERE id = ?`, id)
+	return err
+}
+
+// VerifyAgentToken hashes the plaintext, looks it up, checks it is not
+// revoked, updates last_used, and returns the token metadata.
+func (s *Store) VerifyAgentToken(ctx context.Context, plaintext string) (types.AgentToken, error) {
+	hash := hashToken(plaintext)
+	var t types.AgentToken
+	var revoked int
+	var lastUsed sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, name, created_at, last_used, revoked
+		FROM agent_tokens WHERE token_hash = ?`, hash).Scan(
+		&t.ID, &t.Name, &t.CreatedAt, &lastUsed, &revoked)
+	if err == sql.ErrNoRows {
+		return types.AgentToken{}, fmt.Errorf("invalid token")
+	}
+	if err != nil {
+		return types.AgentToken{}, err
+	}
+	if revoked != 0 {
+		return types.AgentToken{}, fmt.Errorf("token revoked")
+	}
+	t.Revoked = false
+	if lastUsed.Valid {
+		lu := lastUsed.Time
+		t.LastUsed = &lu
+	}
+	// Best-effort update of last_used; don't fail auth if this write fails.
+	now := time.Now().UTC()
+	_, _ = s.db.ExecContext(ctx, `UPDATE agent_tokens SET last_used = ? WHERE id = ?`, now, t.ID)
+	return t, nil
 }
