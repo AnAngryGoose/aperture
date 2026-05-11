@@ -599,6 +599,55 @@ func (p *agentDockerProvider) RemoveVolume(ctx context.Context, name string, for
 	return err
 }
 
+func (p *agentDockerProvider) ListImages(ctx context.Context) ([]types.DockerImage, error) {
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "list_images", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out []types.DockerImage
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (p *agentDockerProvider) InspectImage(ctx context.Context, id string) (*types.DockerImage, error) {
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "inspect_image", id, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out types.DockerImage
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (p *agentDockerProvider) RemoveImage(ctx context.Context, id string, force bool) error {
+	params := marshalParams(map[string]any{"force": force})
+	_, err := p.handler.sendDockerCmd(ctx, p.hostID, "remove_image", id, params)
+	return err
+}
+
+func (p *agentDockerProvider) PullImage(ctx context.Context, image string) error {
+	params := marshalParams(types.ImagePullSpec{Image: image})
+	_, err := p.handler.sendDockerCmd(ctx, p.hostID, "pull_image", image, params)
+	return err
+}
+
+func (p *agentDockerProvider) CheckImageUpdate(ctx context.Context, image string) (*types.ImageUpdateStatus, error) {
+	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "check_image_update", image, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out types.ImageUpdateStatus
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+
 
 // ── agentComposeProvider ─────────────────────────────────────────────────────
 

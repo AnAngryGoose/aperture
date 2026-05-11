@@ -287,6 +287,24 @@ export interface VolumeCreateSpec {
 	labels?: Record<string, string>;
 }
 
+export interface DockerImage {
+	id: string;
+	repo_tags: string[];
+	repo_digests: string[];
+	created: number;
+	size_bytes: number;
+	containers: number;
+	labels?: Record<string, string>;
+}
+
+export interface ImageUpdateStatus {
+	up_to_date: boolean;
+	local_digest: string;
+	remote_digest: string;
+	error?: string;
+}
+
+
 export interface ComposeService {
 	name: string;
 	container_id?: string;

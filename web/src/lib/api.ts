@@ -121,6 +121,17 @@ export const api = {
 	removeVolume: (hostID: string, name: string, force = false) =>
 		del(`/api/hosts/${hostID}/volumes/${name}?force=${force}`),
 
+	images: (id: string) => get<DockerImage[]>(`/api/hosts/${id}/images`),
+	imageInspect: (hostID: string, name: string) =>
+		get<DockerImage>(`/api/hosts/${hostID}/images/${encodeURIComponent(name)}`),
+	removeImage: (hostID: string, name: string, force = false) =>
+		del(`/api/hosts/${hostID}/images/${encodeURIComponent(name)}?force=${force}`),
+	pullImage: (hostID: string, image: string) =>
+		send<{ ok: boolean }>(`/api/hosts/${hostID}/images/pull`, 'POST', { image }),
+	checkImageUpdate: (hostID: string, name: string) =>
+		get<ImageUpdateStatus>(`/api/hosts/${hostID}/images/${encodeURIComponent(name)}/update-check`),
+
+
 	alertMetadata: () => get<AlertMetadata>('/api/alerts/metadata'),
 	alertRules: (hostID?: string) =>
 		get<AlertRule[]>(`/api/alerts/rules${hostID ? `?host_id=${hostID}` : ''}`),

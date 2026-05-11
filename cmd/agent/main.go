@@ -564,6 +564,50 @@ func dispatchDocker(ctx context.Context, dc *dockerctl.Client, req dockerReqFram
 		}
 		return json.Marshal(map[string]bool{"ok": true})
 
+	case "list_images":
+		imgs, err := dc.ListImages(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if imgs == nil {
+			imgs = []types.DockerImage{}
+		}
+		return json.Marshal(imgs)
+
+	case "inspect_image":
+		i, err := dc.InspectImage(ctx, req.CID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(i)
+
+	case "remove_image":
+		var p struct {
+			Force bool `json:"force"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		if err := dc.RemoveImage(ctx, req.CID, p.Force); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]bool{"ok": true})
+
+	case "pull_image":
+		var spec types.ImagePullSpec
+		if err := json.Unmarshal(req.Params, &spec); err != nil {
+			return nil, fmt.Errorf("unmarshal pull spec: %w", err)
+		}
+		if err := dc.PullImage(ctx, spec.Image); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]bool{"ok": true})
+
+	case "check_image_update":
+		status, err := dc.CheckImageUpdate(ctx, req.CID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(status)
+
 	default:
 		return nil, fmt.Errorf("unknown docker action: %s", req.Action)
 	}

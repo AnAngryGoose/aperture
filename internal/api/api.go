@@ -97,6 +97,13 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Get("/hosts/{id}/volumes/{name}", s.inspectVolume)
 		r.Delete("/hosts/{id}/volumes/{name}", s.removeVolume)
 
+		// Images
+		r.Get("/hosts/{id}/images", s.listImages)
+		r.Get("/hosts/{id}/images/{img}", s.inspectImage)
+		r.Delete("/hosts/{id}/images/{img}", s.removeImage)
+		r.Post("/hosts/{id}/images/pull", s.pullImage)
+		r.Get("/hosts/{id}/images/{img}/update-check", s.checkImageUpdate)
+
 		// Compose stack management. Specific sub-routes registered before /{action}.
 		r.Get("/hosts/{id}/compose", s.listCompose)
 		r.Post("/hosts/{id}/compose", s.createCompose)
@@ -737,6 +744,94 @@ func (s *Server) removeVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
+
+// --- images ---
+
+func (s *Server) listImages(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	imgs, err := d.ListImages(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	if imgs == nil {
+		imgs = []types.DockerImage{}
+	}
+	writeJSON(w, http.StatusOK, imgs)
+}
+
+func (s *Server) inspectImage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	imgName := chi.URLParam(r, "img")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	img, err := d.InspectImage(r.Context(), imgName)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, img)
+}
+
+func (s *Server) removeImage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	imgName := chi.URLParam(r, "img")
+	force := r.URL.Query().Get("force") == "true"
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	if err := d.RemoveImage(r.Context(), imgName, force); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) pullImage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	var spec types.ImagePullSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.PullImage(r.Context(), spec.Image); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) checkImageUpdate(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	imgName := chi.URLParam(r, "img")
+	d, ok := s.hub.Docker(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
+		return
+	}
+	status, err := d.CheckImageUpdate(r.Context(), imgName)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
 
 // --- alerts ---
 

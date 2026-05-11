@@ -53,6 +53,11 @@ type DockerProvider interface {
 	InspectVolume(ctx context.Context, name string) (*types.DockerVolume, error)
 	CreateVolume(ctx context.Context, spec types.VolumeCreateSpec) (string, error)
 	RemoveVolume(ctx context.Context, name string, force bool) error
+	ListImages(ctx context.Context) ([]types.DockerImage, error)
+	InspectImage(ctx context.Context, id string) (*types.DockerImage, error)
+	RemoveImage(ctx context.Context, id string, force bool) error
+	PullImage(ctx context.Context, image string) error
+	CheckImageUpdate(ctx context.Context, image string) (*types.ImageUpdateStatus, error)
 }
 
 // ComposeProvider abstracts docker compose stack operations for a single host.

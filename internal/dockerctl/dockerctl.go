@@ -649,3 +649,99 @@ func (c *Client) CreateVolume(ctx context.Context, spec types.VolumeCreateSpec) 
 func (c *Client) RemoveVolume(ctx context.Context, name string, force bool) error {
 	return c.cli.VolumeRemove(ctx, name, force)
 }
+
+func (c *Client) ListImages(ctx context.Context) ([]types.DockerImage, error) {
+	images, err := c.cli.ImageList(ctx, image.ListOptions{All: false})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]types.DockerImage, 0, len(images))
+	for _, img := range images {
+		out = append(out, types.DockerImage{
+			ID:          img.ID,
+			RepoTags:    img.RepoTags,
+			RepoDigests: img.RepoDigests,
+			Created:     img.Created,
+			SizeBytes:   img.Size,
+			Containers:  img.Containers,
+			Labels:      img.Labels,
+		})
+	}
+	return out, nil
+}
+
+func (c *Client) InspectImage(ctx context.Context, id string) (*types.DockerImage, error) {
+	img, _, err := c.cli.ImageInspectWithRaw(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	var created int64
+	if t, err := time.Parse(time.RFC3339Nano, img.Created); err == nil {
+		created = t.Unix()
+	}
+	return &types.DockerImage{
+		ID:          img.ID,
+		RepoTags:    img.RepoTags,
+		RepoDigests: img.RepoDigests,
+		Created:     created,
+		SizeBytes:   img.Size,
+		Labels:      img.Config.Labels,
+	}, nil
+}
+
+func (c *Client) RemoveImage(ctx context.Context, id string, force bool) error {
+	_, err := c.cli.ImageRemove(ctx, id, image.RemoveOptions{Force: force})
+	return err
+}
+
+func (c *Client) PullImage(ctx context.Context, img string) error {
+	if !strings.Contains(img, ":") {
+		img += ":latest"
+	}
+	rc, err := c.cli.ImagePull(ctx, img, image.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	_, err = io.Copy(io.Discard, rc)
+	return err
+}
+
+func (c *Client) CheckImageUpdate(ctx context.Context, img string) (*types.ImageUpdateStatus, error) {
+	if !strings.Contains(img, ":") {
+		img += ":latest"
+	}
+	status := &types.ImageUpdateStatus{}
+	
+	localImg, _, err := c.cli.ImageInspectWithRaw(ctx, img)
+	if err != nil {
+		status.Error = fmt.Sprintf("local inspect failed: %v", err)
+		return status, nil
+	}
+
+	dist, err := c.cli.DistributionInspect(ctx, img, "")
+	if err != nil {
+		status.Error = fmt.Sprintf("registry inspect failed: %v", err)
+		return status, nil
+	}
+
+	remoteDigest := string(dist.Descriptor.Digest)
+	status.RemoteDigest = remoteDigest
+	
+	for _, rd := range localImg.RepoDigests {
+		if strings.Contains(rd, remoteDigest) {
+			status.UpToDate = true
+			status.LocalDigest = remoteDigest
+			return status, nil
+		}
+	}
+	
+	if len(localImg.RepoDigests) > 0 {
+		status.LocalDigest = localImg.RepoDigests[0]
+	} else {
+		status.LocalDigest = localImg.ID
+	}
+	status.UpToDate = false
+	return status, nil
+}
+

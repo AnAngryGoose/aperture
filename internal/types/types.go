@@ -282,6 +282,31 @@ type VolumeCreateSpec struct {
 	Labels     map[string]string `json:"labels,omitempty"`
 }
 
+// DockerImage represents a docker image on the host.
+type DockerImage struct {
+	ID          string            `json:"id"`
+	RepoTags    []string          `json:"repo_tags"`
+	RepoDigests []string          `json:"repo_digests"`
+	Created     int64             `json:"created"`
+	SizeBytes   int64             `json:"size_bytes"`
+	Containers  int64             `json:"containers"`
+	Labels      map[string]string `json:"labels,omitempty"`
+}
+
+// ImageUpdateStatus holds the result of a registry digest check.
+type ImageUpdateStatus struct {
+	UpToDate     bool   `json:"up_to_date"`
+	LocalDigest  string `json:"local_digest"`
+	RemoteDigest string `json:"remote_digest"`
+	Error        string `json:"error,omitempty"`
+}
+
+// ImagePullSpec is the surface-layer pull request.
+type ImagePullSpec struct {
+	Image string `json:"image"`
+}
+
+
 // ResourceUpdate is the body for PUT /api/hosts/{id}/containers/{cid}/resources.
 // nil pointer fields mean "leave unchanged".
 type ResourceUpdate struct {
