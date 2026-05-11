@@ -62,6 +62,21 @@
 					return [] as ComposeStack[];
 				})
 			]);
+
+			// Fetch detailed services for expanded stacks
+			const expandedProjects = s.filter(st => expanded[st.project]).map(st => st.project);
+			if (expandedProjects.length > 0) {
+				const details = await Promise.all(
+					expandedProjects.map(proj => api.composeStack(id, proj).catch(() => null))
+				);
+				for (const d of details) {
+					if (d) {
+						const idx = s.findIndex(st => st.project === d.project);
+						if (idx !== -1) s[idx] = d;
+					}
+				}
+			}
+
 			hostName = h?.name ?? id;
 			stacks = s;
 			composeAvailable = true;
@@ -79,15 +94,31 @@
 	});
 	onDestroy(() => { if (timer) clearInterval(timer); });
 
+	async function loadServices(project: string) {
+		try {
+			const res = await api.composeStack(id, project);
+			const idx = stacks.findIndex(s => s.project === project);
+			if (idx !== -1) {
+				stacks[idx] = res;
+			}
+		} catch (e) {
+			toast.error(`Failed to load services: ${(e as Error).message}`);
+		}
+	}
+
 	function toggleExpand(project: string) {
 		expanded[project] = !expanded[project];
-		if (expanded[project] && !activeTab[project]) {
-			activeTab[project] = 'services';
+		if (expanded[project]) {
+			if (!activeTab[project]) {
+				activeTab[project] = 'services';
+			}
+			loadServices(project);
 		}
 	}
 
 	function setTab(project: string, tab: 'services' | 'file' | 'logs') {
 		activeTab[project] = tab;
+		if (tab === 'services') loadServices(project);
 		if (tab === 'file' && !fileContent[project]) loadFile(project);
 		if (tab === 'logs') loadLogs(project);
 	}
@@ -401,7 +432,7 @@
 										</tbody>
 									</table>
 								{:else}
-									<p class="muted pad">No containers — stack may be stopped. Use ▶ to start it.</p>
+									<p class="muted pad">No containers found — stack may be stopped or loading. Use ▶ to start it.</p>
 								{/if}
 							{/if}
 
