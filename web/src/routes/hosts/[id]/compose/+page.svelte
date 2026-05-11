@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
-	import type { ComposeStack, ComposeService } from '$lib/types';
+	import type { ComposeStack, ComposeService, ComposeVersion } from '$lib/types';
 	import { toast } from '$lib/toast';
 
 	let id = $derived(page.params.id);
@@ -29,6 +29,11 @@
 	let logLoading = $state<Record<string, boolean>>({});
 	let logService = $state<Record<string, string>>({});
 	let logTail = $state<Record<string, number>>({});
+
+	// History
+	let historyOpen = $state<Record<string, boolean>>({});
+	let historyLoading = $state<Record<string, boolean>>({});
+	let versions = $state<Record<string, ComposeVersion[]>>({});
 
 	// New stack modal
 	let newModal = $state(false);
@@ -175,6 +180,34 @@
 		}
 	}
 
+	async function loadHistory(project: string) {
+		historyOpen[project] = true;
+		historyLoading[project] = true;
+		try {
+			versions[project] = await api.composeVersions(id, project);
+		} catch (e) {
+			toast.error(`History error: ${(e as Error).message}`);
+		} finally {
+			historyLoading[project] = false;
+		}
+	}
+
+	async function restoreVersion(project: string, vid: number) {
+		if (!confirm("Are you sure you want to load this version into the editor? You will still need to Save to apply it.")) return;
+		try {
+			const v = await api.composeVersionContent(id, vid);
+			if (v && v.content) {
+				fileContent[project] = v.content;
+				fileDirty[project] = true;
+				historyOpen[project] = false;
+			}
+		} catch(e) {
+			toast.error(`Restore error: ${(e as Error).message}`);
+		}
+	}
+
+	// --- Actions ---
+
 	async function stackAction(project: string, action: string, service = '', extra: Record<string, unknown> = {}) {
 		const st = stacks.find(s => s.project === project);
 		const key = `${project}:${action}:${service}`;
@@ -290,7 +323,6 @@
 		<a href={`/hosts/${id}/networks`} class="">Networks</a>
 		<a href={`/hosts/${id}/volumes`} class="">Volumes</a>
 		<a href={`/hosts/${id}/images`}>Images</a>
-		<a href={`/hosts/${id}/logs`} class="placeholder">Logs</a>
 	</nav>
 
 	{#if loading}
@@ -445,6 +477,7 @@
 										<div class="file-toolbar">
 											<span class="file-path muted">{st.working_dir}/compose.yml</span>
 											<div class="file-actions">
+												<button class="sm-btn" onclick={() => loadHistory(st.project)}>🕒 History</button>
 												<button class="sm-btn" onclick={() => loadFile(st.project)}>↻ Reload</button>
 												<button class="sm-btn" disabled={fileSaving[st.project] || !fileDirty[st.project]}
 													onclick={() => saveFile(st.project)}>Save</button>
@@ -459,6 +492,33 @@
 											placeholder="Compose YAML will appear here…"></textarea>
 										{#if fileDirty[st.project]}
 											<p class="dirty-hint">Unsaved changes — Save to write, Save + Deploy to write and restart.</p>
+										{/if}
+
+										{#if historyOpen[st.project]}
+											<div class="history-modal-bg" onclick={() => historyOpen[st.project] = false} role="presentation">
+												<div class="history-modal" onclick={e => e.stopPropagation()} role="dialog" aria-modal="true">
+													<div class="history-head">
+														<h3>Version History</h3>
+														<button class="sm-btn" onclick={() => historyOpen[st.project] = false}>Close</button>
+													</div>
+													<div class="history-body">
+														{#if historyLoading[st.project]}
+															<p class="muted">Loading history...</p>
+														{:else if !versions[st.project] || versions[st.project].length === 0}
+															<p class="muted">No backup versions found.</p>
+														{:else}
+															<ul class="version-list">
+																{#each versions[st.project] as v}
+																	<li>
+																		<div class="v-time">{new Date(v.created_at).toLocaleString()}</div>
+																		<button class="sm-btn" onclick={() => restoreVersion(st.project, v.id)}>Restore</button>
+																	</li>
+																{/each}
+															</ul>
+														{/if}
+													</div>
+												</div>
+											</div>
 										{/if}
 									{/if}
 								</div>
@@ -792,4 +852,14 @@ h1 { font-size: 1.3rem; font-weight: 600; margin: 0; }
 	background: var(--danger, #e74c3c); color: #fff; border-color: transparent;
 }
 .modal-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* History modal */
+.history-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(2px); }
+.history-modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; width: 400px; max-width: 90vw; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+.history-head { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: var(--bg); }
+.history-head h3 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.history-body { padding: 1rem; max-height: 400px; overflow-y: auto; }
+.version-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.version-list li { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.version-list .v-time { font-family: monospace; color: var(--fg-muted); font-size: 0.85rem; }
 </style>

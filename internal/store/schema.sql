@@ -125,3 +125,14 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
     last_used  TIMESTAMP,
     revoked    INTEGER NOT NULL DEFAULT 0
 );
+
+-- TODO: Rework this database storage system in the near future to a more efficient and sensible system.
+CREATE TABLE IF NOT EXISTS compose_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id TEXT NOT NULL,
+    project TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    yaml_content TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compose_versions_lookup ON compose_versions(host_id, project);
+

@@ -163,7 +163,6 @@
 	<a href={`/hosts/${id}/networks`}>Networks</a>
 	<a href={`/hosts/${id}/volumes`}>Volumes</a>
 	<a href={`/hosts/${id}/images`} class="active">Images</a>
-	<a href={`/hosts/${id}/logs`} class="placeholder">Logs</a>
 </nav>
 
 {#if error}

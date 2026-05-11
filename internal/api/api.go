@@ -109,6 +109,8 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		r.Post("/hosts/{id}/compose", s.createCompose)
 		r.Get("/hosts/{id}/compose/{project}/file", s.composeReadFile)
 		r.Put("/hosts/{id}/compose/{project}/file", s.composeWriteFile)
+		r.Get("/hosts/{id}/compose/{project}/versions", s.composeVersions)
+		r.Get("/hosts/{id}/compose/versions/{vid}", s.composeVersionContent)
 		r.Get("/hosts/{id}/compose/{project}/logs", s.composeLogs)
 		r.Get("/hosts/{id}/compose/{project}", s.getCompose)
 		r.Post("/hosts/{id}/compose/{project}/{action}", s.composeAction)
@@ -1437,6 +1439,12 @@ func (s *Server) composeWriteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Backup the current file before overwriting.
+	if currentContent, err := cp.ReadFile(r.Context(), workingDir); err == nil && currentContent != "" {
+		// Best effort, don't fail the write if backup fails.
+		_ = s.hub.Store().SaveComposeVersion(r.Context(), hostID, project, currentContent)
+	}
+
 	if err := cp.WriteFile(r.Context(), workingDir, body.Content); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1454,6 +1462,43 @@ func (s *Server) composeWriteFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"output": output})
+}
+
+func (s *Server) composeVersions(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	project := chi.URLParam(r, "project")
+
+	versions, err := s.hub.Store().ListComposeVersions(r.Context(), hostID, project)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if versions == nil {
+		versions = []types.ComposeVersion{}
+	}
+	writeJSON(w, http.StatusOK, versions)
+}
+
+func (s *Server) composeVersionContent(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	vidStr := chi.URLParam(r, "vid")
+
+	var vid int64
+	if _, err := fmt.Sscanf(vidStr, "%d", &vid); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid version id"))
+		return
+	}
+
+	v, err := s.hub.Store().GetComposeVersion(r.Context(), vid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if v == nil || v.HostID != hostID {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("version not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 func (s *Server) createCompose(w http.ResponseWriter, r *http.Request) {

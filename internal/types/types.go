@@ -306,6 +306,15 @@ type ImagePullSpec struct {
 	Image string `json:"image"`
 }
 
+type ComposeVersion struct {
+	ID        int64  `json:"id"`
+	HostID    string `json:"host_id"`
+	Project   string `json:"project"`
+	CreatedAt string `json:"created_at"`
+	Content   string `json:"content,omitempty"`
+}
+
+
 
 // ResourceUpdate is the body for PUT /api/hosts/{id}/containers/{cid}/resources.
 // nil pointer fields mean "leave unchanged".

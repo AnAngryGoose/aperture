@@ -979,3 +979,77 @@ func (s *Store) VerifyAgentToken(ctx context.Context, plaintext string) (types.A
 	_, _ = s.db.ExecContext(ctx, `UPDATE agent_tokens SET last_used = ? WHERE id = ?`, now, t.ID)
 	return t, nil
 }
+
+// --- compose versions ---
+
+func (s *Store) SaveComposeVersion(ctx context.Context, hostID, project, content string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Insert the new version
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO compose_versions (host_id, project, yaml_content)
+		VALUES (?, ?, ?)`, hostID, project, content)
+	if err != nil {
+		return err
+	}
+
+	// Prune older versions, keeping only the 10 most recent for this project
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM compose_versions 
+		WHERE id NOT IN (
+			SELECT id FROM compose_versions 
+			WHERE host_id = ? AND project = ? 
+			ORDER BY created_at DESC 
+			LIMIT 10
+		) AND host_id = ? AND project = ?`, hostID, project, hostID, project)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (s *Store) ListComposeVersions(ctx context.Context, hostID, project string) ([]types.ComposeVersion, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, host_id, project, created_at 
+		FROM compose_versions 
+		WHERE host_id = ? AND project = ? 
+		ORDER BY created_at DESC`, hostID, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var versions []types.ComposeVersion
+	for rows.Next() {
+		var v types.ComposeVersion
+		var t time.Time
+		if err := rows.Scan(&v.ID, &v.HostID, &v.Project, &t); err != nil {
+			return nil, err
+		}
+		v.CreatedAt = t.Format(time.RFC3339)
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
+func (s *Store) GetComposeVersion(ctx context.Context, id int64) (*types.ComposeVersion, error) {
+	var v types.ComposeVersion
+	var t time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, host_id, project, created_at, yaml_content 
+		FROM compose_versions 
+		WHERE id = ?`, id).Scan(&v.ID, &v.HostID, &v.Project, &t, &v.Content)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.CreatedAt = t.Format(time.RFC3339)
+	return &v, nil
+}

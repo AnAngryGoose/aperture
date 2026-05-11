@@ -316,6 +316,15 @@ export interface ComposeService {
 	ports?: PortMapping[];
 }
 
+export interface ComposeVersion {
+	id: number;
+	host_id: string;
+	project: string;
+	created_at: string;
+	content?: string;
+}
+
+
 export interface ComposeStack {
 	project: string;
 	working_dir: string;

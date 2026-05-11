@@ -19,7 +19,10 @@ import type {
 	DockerNetwork,
 	NetworkCreateSpec,
 	DockerVolume,
-	VolumeCreateSpec
+	VolumeCreateSpec,
+	DockerImage,
+	ImageUpdateStatus,
+	ComposeVersion
 } from './types';
 
 // In dev, the SvelteKit dev server runs on :5173 and the Go hub on :8080.
@@ -194,6 +197,10 @@ export const api = {
 		body: { content: string; working_dir?: string; deploy?: boolean }
 	) =>
 		send<{ output: string }>(`/api/hosts/${hostID}/compose/${encodeURIComponent(project)}/file`, 'PUT', body),
+	composeVersions: (hostID: string, project: string) =>
+		get<ComposeVersion[]>(`/api/hosts/${hostID}/compose/${encodeURIComponent(project)}/versions`),
+	composeVersionContent: (hostID: string, vid: number) =>
+		get<ComposeVersion>(`/api/hosts/${hostID}/compose/versions/${vid}`),
 	createComposeStack: (
 		hostID: string,
 		body: { working_dir: string; content: string; start?: boolean }
