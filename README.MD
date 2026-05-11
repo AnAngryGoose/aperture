@@ -2,7 +2,7 @@
 
 A self-hosted homelab command center. One interface for system metrics, container management, alerts, and remote host monitoring — designed to replace Beszel, Portainer/Dockge, and Dozzle with a single coherent tool.
 
-**Current version: v0.3.0-alpha.2**
+**Current version: v0.3.0-alpha.3**
 
 ---
 
