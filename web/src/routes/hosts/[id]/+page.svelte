@@ -115,8 +115,8 @@
 			.map(([mount, series]) => ({
 				mount,
 				x: mountH!.timestamps,
-				usedGiB: series.used.map((v) => v / 1073741824),
-				totalGiB: series.total.map((v) => v / 1073741824)
+				usedBytes: series.used,
+				totalBytes: series.total
 			}))
 	);
 
@@ -531,8 +531,8 @@
 					<div class="card chart-card">
 						<div class="chart-title">{mc.mount}</div>
 						<Chart x={mc.x} series={[
-							{ label: 'Used',  values: mc.usedGiB,  stroke: '#ffcb6b' },
-							{ label: 'Total', values: mc.totalGiB, stroke: '#3a4258', fill: false }
+							{ label: 'Used',  values: mc.usedBytes,  stroke: '#ffcb6b' },
+							{ label: 'Total', values: mc.totalBytes, stroke: '#3a4258', fill: false }
 						]} valueFormatter={fmtGiB} />
 					</div>
 				{/if}

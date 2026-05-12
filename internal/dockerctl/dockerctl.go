@@ -745,3 +745,66 @@ func (c *Client) CheckImageUpdate(ctx context.Context, img string) (*types.Image
 	return status, nil
 }
 
+// ── terminal ──────────────────────────────────────────────────────────────────
+
+// StartTerminal attaches a TTY to a container and returns a WriteCloser for stdin, 
+// a channel for stdout/stderr, and a func for resizing the TTY.
+func (c *Client) StartTerminal(ctx context.Context, cid, cmd string) (io.WriteCloser, <-chan []byte, func(cols, rows uint) error, func(), error) {
+	execCfg := container.ExecOptions{
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty:          true,
+		Cmd:          []string{cmd},
+	}
+
+	execResp, err := c.cli.ContainerExecCreate(ctx, cid, execCfg)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("exec create: %w", err)
+	}
+
+	attachResp, err := c.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{
+		Tty: true,
+	})
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("exec attach: %w", err)
+	}
+
+	if err := c.cli.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{Tty: true}); err != nil {
+		attachResp.Close()
+		return nil, nil, nil, nil, fmt.Errorf("exec start: %w", err)
+	}
+
+	outCh := make(chan []byte, 100)
+
+	// Reader goroutine
+	go func() {
+		defer close(outCh)
+		buf := make([]byte, 1024)
+		for {
+			n, err := attachResp.Reader.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				outCh <- chunk
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	resizeFn := func(cols, rows uint) error {
+		return c.cli.ContainerExecResize(ctx, execResp.ID, container.ResizeOptions{
+			Height: rows,
+			Width:  cols,
+		})
+	}
+
+	closeFn := func() {
+		attachResp.Close()
+	}
+
+	return attachResp.Conn, outCh, resizeFn, closeFn, nil
+}
+

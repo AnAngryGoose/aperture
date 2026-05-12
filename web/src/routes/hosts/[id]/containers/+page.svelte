@@ -4,6 +4,7 @@
 	import { api } from '$lib/api';
 	import type { Container, ContainerInspect, CreateSpec, CreatePortBinding, CreateVolumeBinding } from '$lib/types';
 	import Bar from '$lib/Bar.svelte';
+	import Terminal from '$lib/components/Terminal.svelte';
 	import { formatBytes, formatPct, relTime, absTime } from '$lib/format';
 
 	let id = $derived(page.params.id);
@@ -129,6 +130,15 @@
 		} catch (e) {
 			logsText = `error: ${(e as Error).message}`;
 		}
+	}
+
+	// --- Terminal ---
+	let terminalOpen = $state(false);
+	let terminalCid = $state('');
+
+	function openTerminal(cid: string) {
+		terminalCid = cid;
+		terminalOpen = true;
 	}
 
 	// --- Actions ---
@@ -349,6 +359,9 @@
 							<button class="danger" disabled={busy[c.id]} onclick={() => remove(c.id)}>Remove</button>
 						{/if}
 						<button onclick={() => showLogs(c.id)}>Logs</button>
+						{#if c.state === 'running'}
+							<button onclick={() => openTerminal(c.id)}>Terminal</button>
+						{/if}
 					</td>
 				</tr>
 
@@ -478,6 +491,9 @@
 												{/if}
 												<button disabled={busy[c.id]} onclick={() => recreate(c.id)}>Recreate</button>
 												<button onclick={() => showLogs(c.id)}>Logs</button>
+												{#if inspectData.state === 'running'}
+													<button onclick={() => openTerminal(c.id)}>Terminal</button>
+												{/if}
 												<button class="danger" disabled={busy[c.id]} onclick={() => remove(c.id, true)}>Force remove</button>
 											</div>
 										</div>
@@ -521,6 +537,14 @@
 				</div>
 			</div>
 			<pre class="logs">{logsFiltered}</pre>
+		</div>
+	</div>
+{/if}
+
+{#if terminalOpen}
+	<div class="modal-backdrop" onclick={() => (terminalOpen = false)}>
+		<div class="modal terminal-modal" onclick={(e) => e.stopPropagation()}>
+			<Terminal hostId={id} cid={terminalCid} onClose={() => (terminalOpen = false)} />
 		</div>
 	</div>
 {/if}
@@ -611,6 +635,15 @@
 					<button type="submit" disabled={creating}>{creating ? 'Creating…' : 'Create'}</button>
 				</div>
 			</form>
+		</div>
+	</div>
+{/if}
+
+<!-- Terminal Modal -->
+{#if terminalOpen}
+	<div class="modal-backdrop" onclick={() => (terminalOpen = false)}>
+		<div class="modal terminal-modal" onclick={(e) => e.stopPropagation()}>
+			<Terminal hostId={id} cid={terminalCid} onClose={() => (terminalOpen = false)} />
 		</div>
 	</div>
 {/if}
@@ -769,6 +802,15 @@
 		white-space: pre-wrap;
 		word-break: break-all;
 		flex: 1;
+	}
+
+	.terminal-modal {
+		width: min(90vw, 1000px);
+		height: 80vh;
+		display: flex;
+		flex-direction: column;
+		padding: 0;
+		background: #1e1e1e;
 	}
 
 	/* Create modal */

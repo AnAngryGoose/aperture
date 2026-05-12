@@ -5,11 +5,14 @@
 package api
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +22,7 @@ import (
 	"github.com/aperture/aperture/internal/hub"
 	"github.com/aperture/aperture/internal/store"
 	"github.com/aperture/aperture/internal/types"
+	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -78,6 +82,7 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 		// parameterized /{action} route so chi prefers them on exact match.
 		r.Get("/hosts/{id}/containers/{cid}/inspect", s.containerInspect)
 		r.Get("/hosts/{id}/containers/{cid}/logs", s.containerLogs)
+		r.Get("/hosts/{id}/containers/{cid}/terminal", s.containerTerminal)
 		r.Put("/hosts/{id}/containers/{cid}/resources", s.containerUpdateResources)
 		r.Post("/hosts/{id}/containers/{cid}/recreate", s.containerRecreate)
 		r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
@@ -580,6 +585,88 @@ func (s *Server) listNetworks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nets)
 }
 
+func (s *Server) containerTerminal(w http.ResponseWriter, r *http.Request) {
+	hostID := chi.URLParam(r, "id")
+	cid := chi.URLParam(r, "cid")
+
+	cmd := r.URL.Query().Get("cmd")
+	if cmd == "" {
+		cmd = "/bin/sh"
+	}
+
+	reqID, outCh, err := s.agentHandler.StartTerminal(r.Context(), hostID, cid, cmd)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("start terminal: %w", err))
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		s.agentHandler.CloseTerminal(context.Background(), hostID, reqID)
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer s.agentHandler.CloseTerminal(context.Background(), hostID, reqID)
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	// Hub-to-Frontend writer
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-outCh:
+				if !ok {
+					conn.Close(websocket.StatusNormalClosure, "terminal closed")
+					cancel()
+					return
+				}
+				// We wrap in JSON for frontend
+				msg, _ := json.Marshal(map[string]interface{}{
+					"type": "data",
+					"data": base64.StdEncoding.EncodeToString(chunk),
+				})
+				if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	// Frontend-to-Hub reader
+	for {
+		_, msg, err := conn.Read(ctx)
+		if err != nil {
+			cancel()
+			break
+		}
+		
+		var frame struct {
+			Type string `json:"type"`
+			Data string `json:"data"` // base64 encoded by frontend
+			Cols uint   `json:"cols"`
+			Rows uint   `json:"rows"`
+		}
+		if err := json.Unmarshal(msg, &frame); err == nil {
+			switch frame.Type {
+			case "input":
+				if frame.Data != "" {
+					if dec, err := base64.StdEncoding.DecodeString(frame.Data); err == nil {
+						_ = s.agentHandler.SendTerminalData(ctx, hostID, reqID, dec)
+					}
+				}
+			case "resize":
+				_ = s.agentHandler.ResizeTerminal(ctx, hostID, reqID, frame.Cols, frame.Rows)
+			}
+		}
+	}
+}
+
 func (s *Server) inspectNetwork(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	netID := chi.URLParam(r, "net_id")
@@ -769,7 +856,7 @@ func (s *Server) listImages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) inspectImage(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	imgName := chi.URLParam(r, "img")
+	imgName, _ := url.PathUnescape(chi.URLParam(r, "img"))
 	d, ok := s.hub.Docker(id)
 	if !ok {
 		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))
@@ -785,7 +872,7 @@ func (s *Server) inspectImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) removeImage(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	imgName := chi.URLParam(r, "img")
+	imgName, _ := url.PathUnescape(chi.URLParam(r, "img"))
 	force := r.URL.Query().Get("force") == "true"
 	d, ok := s.hub.Docker(id)
 	if !ok {
@@ -820,7 +907,7 @@ func (s *Server) pullImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) checkImageUpdate(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	imgName := chi.URLParam(r, "img")
+	imgName, _ := url.PathUnescape(chi.URLParam(r, "img"))
 	d, ok := s.hub.Docker(id)
 	if !ok {
 		writeErr(w, http.StatusNotFound, errors.New("no docker provider for host"))

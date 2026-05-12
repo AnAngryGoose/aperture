@@ -86,14 +86,42 @@ type dockerRespFrame struct {
 	Error string          `json:"error,omitempty"`
 }
 
+// terminalReqFrame is sent hub→agent to start/resize a terminal, or bi-directionally to close.
+type terminalReqFrame struct {
+	Type   string `json:"type"` // "terminal_req"
+	ReqID  string `json:"req_id"`
+	Action string `json:"action"` // "start", "resize", "close"
+	CID    string `json:"cid,omitempty"`
+	Cmd    string `json:"cmd,omitempty"`
+	Cols   uint   `json:"cols,omitempty"`
+	Rows   uint   `json:"rows,omitempty"`
+}
+
+// terminalRespFrame is sent agent→hub to confirm terminal start.
+type terminalRespFrame struct {
+	Type  string `json:"type"` // "terminal_resp"
+	ReqID string `json:"req_id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// terminalDataFrame carries terminal I/O (base64 encoded by json.Marshal).
+type terminalDataFrame struct {
+	Type  string `json:"type"` // "terminal_data"
+	ReqID string `json:"req_id"`
+	Data  []byte `json:"data"`
+}
+
 // ── session ──────────────────────────────────────────────────────────────────
 
 type agentSession struct {
-	conn           *websocket.Conn
-	hostID         string
-	mu             sync.Mutex
-	pending        map[string]chan dockerRespFrame  // docker req_id → channel
-	composePending map[string]chan composeRespFrame // compose req_id → channel
+	conn            *websocket.Conn
+	hostID          string
+	mu              sync.Mutex
+	pending         map[string]chan dockerRespFrame  // docker req_id → channel
+	composePending  map[string]chan composeRespFrame // compose req_id → channel
+	terminalPending map[string]chan terminalRespFrame
+	terminals       map[string]chan []byte // req_id → terminal stdout/stderr chunks
 }
 
 // ── handler ──────────────────────────────────────────────────────────────────
@@ -212,8 +240,10 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sess := &agentSession{
 		conn:           conn,
 		hostID:         hostID,
-		pending:        make(map[string]chan dockerRespFrame),
-		composePending: make(map[string]chan composeRespFrame),
+		pending:         make(map[string]chan dockerRespFrame),
+		composePending:  make(map[string]chan composeRespFrame),
+		terminalPending: make(map[string]chan terminalRespFrame),
+		terminals:       make(map[string]chan []byte),
 	}
 	ah.mu.Lock()
 	ah.sessions[hostID] = sess
@@ -259,6 +289,14 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for reqID, ch := range sess.composePending {
 			ch <- composeRespFrame{ReqID: reqID, OK: false, Error: "agent disconnected"}
 			delete(sess.composePending, reqID)
+		}
+		for reqID, ch := range sess.terminalPending {
+			ch <- terminalRespFrame{ReqID: reqID, OK: false, Error: "agent disconnected"}
+			delete(sess.terminalPending, reqID)
+		}
+		for reqID, ch := range sess.terminals {
+			close(ch)
+			delete(sess.terminals, reqID)
 		}
 		sess.mu.Unlock()
 
@@ -317,6 +355,37 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sess.mu.Unlock()
 			if ok {
 				ch <- resp
+			}
+		case "terminal_resp":
+			var resp terminalRespFrame
+			if err := json.Unmarshal(raw, &resp); err != nil {
+				continue
+			}
+			sess.mu.Lock()
+			ch, ok := sess.terminalPending[resp.ReqID]
+			if ok {
+				delete(sess.terminalPending, resp.ReqID)
+			}
+			sess.mu.Unlock()
+			if ok {
+				select {
+				case ch <- resp:
+				default:
+				}
+			}
+		case "terminal_data":
+			var resp terminalDataFrame
+			if err := json.Unmarshal(raw, &resp); err != nil {
+				continue
+			}
+			sess.mu.Lock()
+			ch, ok := sess.terminals[resp.ReqID]
+			sess.mu.Unlock()
+			if ok {
+				select {
+				case ch <- resp.Data:
+				default:
+				}
 			}
 		}
 	}
@@ -803,4 +872,118 @@ func (p *agentComposeProvider) WriteFile(ctx context.Context, workingDir, conten
 		Content:    content,
 	})
 	return err
+}
+
+// ── terminal methods ─────────────────────────────────────────────────────────
+
+func (ah *AgentHandler) StartTerminal(ctx context.Context, hostID, cid, cmd string) (string, chan []byte, error) {
+	ah.mu.RLock()
+	sess, ok := ah.sessions[hostID]
+	ah.mu.RUnlock()
+	if !ok {
+		return "", nil, fmt.Errorf("agent not connected")
+	}
+
+	reqID := fmt.Sprintf("term_%d", ah.reqCounter.Add(1))
+	respCh := make(chan terminalRespFrame, 1)
+	dataCh := make(chan []byte, 100)
+
+	sess.mu.Lock()
+	sess.terminalPending[reqID] = respCh
+	sess.terminals[reqID] = dataCh
+	sess.mu.Unlock()
+
+	req := terminalReqFrame{
+		Type:   "terminal_req",
+		ReqID:  reqID,
+		Action: "start",
+		CID:    cid,
+		Cmd:    cmd,
+	}
+
+	b, _ := json.Marshal(req)
+	if err := wsjson.Write(ctx, sess.conn, b); err != nil {
+		sess.mu.Lock()
+		delete(sess.terminalPending, reqID)
+		delete(sess.terminals, reqID)
+		sess.mu.Unlock()
+		return "", nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		sess.mu.Lock()
+		delete(sess.terminalPending, reqID)
+		delete(sess.terminals, reqID)
+		sess.mu.Unlock()
+		return "", nil, ctx.Err()
+	case resp := <-respCh:
+		if !resp.OK {
+			sess.mu.Lock()
+			delete(sess.terminals, reqID)
+			sess.mu.Unlock()
+			return "", nil, fmt.Errorf("terminal start failed: %s", resp.Error)
+		}
+		return reqID, dataCh, nil
+	}
+}
+
+func (ah *AgentHandler) SendTerminalData(ctx context.Context, hostID, reqID string, data []byte) error {
+	ah.mu.RLock()
+	sess, ok := ah.sessions[hostID]
+	ah.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("agent not connected")
+	}
+
+	req := terminalDataFrame{
+		Type:  "terminal_data",
+		ReqID: reqID,
+		Data:  data,
+	}
+	b, _ := json.Marshal(req)
+	return wsjson.Write(ctx, sess.conn, b)
+}
+
+func (ah *AgentHandler) ResizeTerminal(ctx context.Context, hostID, reqID string, cols, rows uint) error {
+	ah.mu.RLock()
+	sess, ok := ah.sessions[hostID]
+	ah.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("agent not connected")
+	}
+
+	req := terminalReqFrame{
+		Type:   "terminal_req",
+		ReqID:  reqID,
+		Action: "resize",
+		Cols:   cols,
+		Rows:   rows,
+	}
+	b, _ := json.Marshal(req)
+	return wsjson.Write(ctx, sess.conn, b)
+}
+
+func (ah *AgentHandler) CloseTerminal(ctx context.Context, hostID, reqID string) error {
+	ah.mu.RLock()
+	sess, ok := ah.sessions[hostID]
+	ah.mu.RUnlock()
+	if !ok {
+		return nil // already closed/disconnected
+	}
+
+	sess.mu.Lock()
+	if ch, exists := sess.terminals[reqID]; exists {
+		close(ch)
+		delete(sess.terminals, reqID)
+	}
+	sess.mu.Unlock()
+
+	req := terminalReqFrame{
+		Type:   "terminal_req",
+		ReqID:  reqID,
+		Action: "close",
+	}
+	b, _ := json.Marshal(req)
+	return wsjson.Write(ctx, sess.conn, b)
 }

@@ -35,8 +35,8 @@ export function formatDuration(secs: number): string {
 	return `${s}s`;
 }
 
-export function relTime(iso: string): string {
-	const t = new Date(iso).getTime();
+export function relTime(val: string | number): string {
+	const t = typeof val === 'number' ? val * 1000 : new Date(val).getTime();
 	const diff = (Date.now() - t) / 1000;
 	if (diff < 5) return 'just now';
 	if (diff < 60) return `${Math.floor(diff)}s ago`;
@@ -45,8 +45,9 @@ export function relTime(iso: string): string {
 	return `${Math.floor(diff / 86400)}d ago`;
 }
 
-export function absTime(iso: string): string {
-	return new Date(iso).toLocaleString(undefined, {
+export function absTime(val: string | number): string {
+	const d = typeof val === 'number' ? new Date(val * 1000) : new Date(val);
+	return d.toLocaleString(undefined, {
 		month: 'short', day: 'numeric',
 		hour: 'numeric', minute: '2-digit', second: '2-digit'
 	});

@@ -13,11 +13,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -92,8 +94,42 @@ type dockerRespFrame struct {
 	Error string          `json:"error,omitempty"`
 }
 
+type terminalReqFrame struct {
+	Type   string `json:"type"` // "terminal_req"
+	ReqID  string `json:"req_id"`
+	Action string `json:"action"` // "start", "resize", "close"
+	CID    string `json:"cid,omitempty"`
+	Cmd    string `json:"cmd,omitempty"`
+	Cols   uint   `json:"cols,omitempty"`
+	Rows   uint   `json:"rows,omitempty"`
+}
+
+type terminalRespFrame struct {
+	Type  string `json:"type"` // "terminal_resp"
+	ReqID string `json:"req_id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type terminalDataFrame struct {
+	Type  string `json:"type"` // "terminal_data"
+	ReqID string `json:"req_id"`
+	Data  []byte `json:"data"` // base64 decoded automatically
+}
+
 type agentFrame struct {
 	Type string `json:"type"`
+}
+
+var (
+	activeTerminalsMu sync.Mutex
+	activeTerminals   = make(map[string]*terminalSession)
+)
+
+type terminalSession struct {
+	stdin  io.WriteCloser
+	resize func(cols, rows uint) error
+	close  func()
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -327,6 +363,21 @@ func runSession(
 				continue
 			}
 			go handleComposeReq(ctx, log, conn, lc, req)
+		case "terminal_req":
+			if dc == nil {
+				continue
+			}
+			var req terminalReqFrame
+			if err := json.Unmarshal(msg, &req); err != nil {
+				continue
+			}
+			go handleTerminalReq(ctx, log, conn, dc, req)
+		case "terminal_data":
+			var req terminalDataFrame
+			if err := json.Unmarshal(msg, &req); err != nil {
+				continue
+			}
+			go handleTerminalData(ctx, req)
 		}
 	}
 }
@@ -351,6 +402,76 @@ func handleDockerReq(ctx context.Context, log *slog.Logger, conn *websocket.Conn
 
 	if werr := wsjson.Write(ctx, conn, resp); werr != nil {
 		log.Warn("write docker_resp failed", "req_id", req.ReqID, "err", werr)
+	}
+}
+
+func handleTerminalReq(ctx context.Context, log *slog.Logger, conn *websocket.Conn, dc *dockerctl.Client, req terminalReqFrame) {
+	if req.Action == "start" {
+		stdin, outCh, resizeFn, closeFn, err := dc.StartTerminal(ctx, req.CID, req.Cmd)
+		
+		resp := terminalRespFrame{
+			Type:  "terminal_resp",
+			ReqID: req.ReqID,
+			OK:    err == nil,
+		}
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		if werr := wsjson.Write(ctx, conn, resp); werr != nil {
+			log.Warn("write terminal_resp failed", "err", werr)
+		}
+
+		if err == nil {
+			activeTerminalsMu.Lock()
+			activeTerminals[req.ReqID] = &terminalSession{
+				stdin:  stdin,
+				resize: resizeFn,
+				close:  closeFn,
+			}
+			activeTerminalsMu.Unlock()
+
+			// Read from outCh and send to hub
+			go func() {
+				for chunk := range outCh {
+					dataFrame := terminalDataFrame{
+						Type:  "terminal_data",
+						ReqID: req.ReqID,
+						Data:  chunk,
+					}
+					wsjson.Write(ctx, conn, dataFrame)
+				}
+				// Cleanup on close
+				activeTerminalsMu.Lock()
+				delete(activeTerminals, req.ReqID)
+				activeTerminalsMu.Unlock()
+			}()
+		}
+	} else if req.Action == "resize" {
+		activeTerminalsMu.Lock()
+		sess, ok := activeTerminals[req.ReqID]
+		activeTerminalsMu.Unlock()
+		if ok && sess.resize != nil {
+			sess.resize(req.Cols, req.Rows)
+		}
+	} else if req.Action == "close" {
+		activeTerminalsMu.Lock()
+		sess, ok := activeTerminals[req.ReqID]
+		if ok {
+			delete(activeTerminals, req.ReqID)
+		}
+		activeTerminalsMu.Unlock()
+		if ok && sess.close != nil {
+			sess.close()
+		}
+	}
+}
+
+func handleTerminalData(ctx context.Context, req terminalDataFrame) {
+	activeTerminalsMu.Lock()
+	sess, ok := activeTerminals[req.ReqID]
+	activeTerminalsMu.Unlock()
+	if ok && sess.stdin != nil {
+		sess.stdin.Write(req.Data)
 	}
 }
 
