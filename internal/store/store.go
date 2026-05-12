@@ -609,7 +609,7 @@ func (s *Store) ListAlertRules(ctx context.Context, hostID *string) ([]types.Ale
 // Used on the evaluator hot path.
 func (s *Store) ListEnabledRulesFor(ctx context.Context, hostID string) ([]types.AlertRule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, host_id, metric, op, threshold, duration_s, enabled, created_at
+		SELECT id, host_id, metric, op, threshold, duration_s, enabled, severity, created_at
 		FROM alert_rules
 		WHERE enabled = 1 AND (host_id IS NULL OR host_id = ?)`, hostID)
 	if err != nil {

@@ -43,10 +43,12 @@ type Evaluator struct {
 	// per host. Cleared when the breach ends (resolves) or when the event
 	// fires (moves to "open"). Used to enforce sustained-duration semantics.
 	pending map[ruleHostKey]time.Time
-	// open is the live map of currently-firing (rule_id, host_id) ->
-	// alert_event ID. Loaded from the DB on construction so a hub restart
-	// can resolve events that were open at shutdown.
-	open map[ruleHostKey]int64
+	// open is the live map of currently-firing (rule_id, host_id) -> stored
+	// AlertEvent. Storing the full event (not just the ID) means resolve
+	// notifications carry the original FiredAt without an extra DB round-trip.
+	// Loaded from the DB on construction so a hub restart can resolve events
+	// that were open at shutdown.
+	open map[ruleHostKey]types.AlertEvent
 }
 
 // SetNotifier wires in a Notifier so fired/resolved events are dispatched to
@@ -67,14 +69,14 @@ func New(ctx context.Context, st *store.Store, log *slog.Logger) (*Evaluator, er
 		store:   st,
 		log:     log,
 		pending: make(map[ruleHostKey]time.Time),
-		open:    make(map[ruleHostKey]int64),
+		open:    make(map[ruleHostKey]types.AlertEvent),
 	}
 	openEvents, err := st.ListAlertEvents(ctx, store.AlertEventFilter{OpenOnly: true, Limit: 10_000})
 	if err != nil {
 		return nil, fmt.Errorf("load open alert events: %w", err)
 	}
 	for _, ev := range openEvents {
-		e.open[ruleHostKey{ev.RuleID, ev.HostID}] = ev.ID
+		e.open[ruleHostKey{ev.RuleID, ev.HostID}] = ev
 	}
 	if len(openEvents) > 0 {
 		log.Info("alert evaluator restored open events", "count", len(openEvents))
@@ -131,16 +133,19 @@ func (e *Evaluator) evalOne(ctx context.Context, r types.AlertRule, sample types
 		// Not breaching anymore. Cancel any pending tracking…
 		delete(e.pending, key)
 		// …and resolve any currently-open event.
-		if id, firing := e.open[key]; firing {
-			if err := e.store.ResolveAlertEvent(ctx, id, sample.Timestamp); err != nil {
-				e.log.Error("alerts: resolve event", "id", id, "err", err)
+		if openEv, firing := e.open[key]; firing {
+			if err := e.store.ResolveAlertEvent(ctx, openEv.ID, sample.Timestamp); err != nil {
+				e.log.Error("alerts: resolve event", "id", openEv.ID, "err", err)
 				return
 			}
 			delete(e.open, key)
-			e.log.Info("alert resolved", "rule_id", r.ID, "host_id", sample.HostID, "event_id", id, "value", val)
+			e.log.Info("alert resolved", "rule_id", r.ID, "host_id", sample.HostID, "event_id", openEv.ID, "value", val)
 			if e.notifier != nil {
-				ev := types.AlertEvent{ID: id, RuleID: r.ID, HostID: sample.HostID, FiredAt: sample.Timestamp, Value: val}
-				go e.notifier.Dispatch(ctx, ev, r, true)
+				// Use the stored FiredAt so notifications show when the alert
+				// originally fired, not when it resolved.
+				resolvedEv := openEv
+				resolvedEv.Value = val
+				go e.notifier.Dispatch(ctx, resolvedEv, r, true)
 			}
 		}
 	}
@@ -161,7 +166,7 @@ func (e *Evaluator) fire(ctx context.Context, r types.AlertRule, sample types.Me
 		return
 	}
 	ev.ID = id
-	e.open[key] = id
+	e.open[key] = ev
 	delete(e.pending, key)
 	e.log.Warn("alert fired",
 		"rule_id", r.ID, "host_id", sample.HostID, "event_id", id,

@@ -249,15 +249,14 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ah.sessions[hostID] = sess
 	ah.mu.Unlock()
 
-	// 6. Optionally register docker + compose providers.
+	// 6. Optionally register docker + compose + terminal providers.
 	if hello.HasDocker {
-		dp := &agentDockerProvider{handler: ah, hostID: hostID}
-		ah.hub.RegisterDocker(hostID, dp)
+		ah.hub.RegisterDocker(hostID, &agentDockerProvider{handler: ah, hostID: hostID})
+		ah.hub.RegisterTerminal(hostID, &agentTerminalProvider{handler: ah, hostID: hostID})
 		ah.log.Info("docker provider active", "host_id", hostID)
 	}
 	if hello.HasCompose {
-		cp := &agentComposeProvider{handler: ah, hostID: hostID}
-		ah.hub.RegisterCompose(hostID, cp)
+		ah.hub.RegisterCompose(hostID, &agentComposeProvider{handler: ah, hostID: hostID})
 		ah.log.Info("compose provider active", "host_id", hostID)
 	}
 
@@ -275,10 +274,9 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		delete(ah.sessions, hostID)
 		ah.mu.Unlock()
 
-		ah.hub.mu.Lock()
-		delete(ah.hub.dockers, hostID)
-		delete(ah.hub.composes, hostID)
-		ah.hub.mu.Unlock()
+		ah.hub.UnregisterDocker(hostID)
+		ah.hub.UnregisterCompose(hostID)
+		ah.hub.UnregisterTerminal(hostID)
 
 		// Drain pending requests so callers unblock immediately.
 		sess.mu.Lock()
@@ -901,8 +899,7 @@ func (ah *AgentHandler) StartTerminal(ctx context.Context, hostID, cid, cmd stri
 		Cmd:    cmd,
 	}
 
-	b, _ := json.Marshal(req)
-	if err := wsjson.Write(ctx, sess.conn, b); err != nil {
+	if err := wsjson.Write(ctx, sess.conn, req); err != nil {
 		sess.mu.Lock()
 		delete(sess.terminalPending, reqID)
 		delete(sess.terminals, reqID)
@@ -941,8 +938,7 @@ func (ah *AgentHandler) SendTerminalData(ctx context.Context, hostID, reqID stri
 		ReqID: reqID,
 		Data:  data,
 	}
-	b, _ := json.Marshal(req)
-	return wsjson.Write(ctx, sess.conn, b)
+	return wsjson.Write(ctx, sess.conn, req)
 }
 
 func (ah *AgentHandler) ResizeTerminal(ctx context.Context, hostID, reqID string, cols, rows uint) error {
@@ -960,8 +956,7 @@ func (ah *AgentHandler) ResizeTerminal(ctx context.Context, hostID, reqID string
 		Cols:   cols,
 		Rows:   rows,
 	}
-	b, _ := json.Marshal(req)
-	return wsjson.Write(ctx, sess.conn, b)
+	return wsjson.Write(ctx, sess.conn, req)
 }
 
 func (ah *AgentHandler) CloseTerminal(ctx context.Context, hostID, reqID string) error {
@@ -984,6 +979,33 @@ func (ah *AgentHandler) CloseTerminal(ctx context.Context, hostID, reqID string)
 		ReqID:  reqID,
 		Action: "close",
 	}
-	b, _ := json.Marshal(req)
-	return wsjson.Write(ctx, sess.conn, b)
+	return wsjson.Write(ctx, sess.conn, req)
 }
+
+// ── agentTerminalProvider ─────────────────────────────────────────────────────
+
+// agentTerminalProvider adapts AgentHandler's hostID-keyed terminal methods to
+// the hub.TerminalProvider interface (which is already scoped to one host).
+type agentTerminalProvider struct {
+	handler *AgentHandler
+	hostID  string
+}
+
+func (p *agentTerminalProvider) StartTerminal(ctx context.Context, cid, cmd string) (string, <-chan []byte, error) {
+	return p.handler.StartTerminal(ctx, p.hostID, cid, cmd)
+}
+
+func (p *agentTerminalProvider) SendTerminalData(ctx context.Context, reqID string, data []byte) error {
+	return p.handler.SendTerminalData(ctx, p.hostID, reqID, data)
+}
+
+func (p *agentTerminalProvider) ResizeTerminal(ctx context.Context, reqID string, cols, rows uint) error {
+	return p.handler.ResizeTerminal(ctx, p.hostID, reqID, cols, rows)
+}
+
+func (p *agentTerminalProvider) CloseTerminal(ctx context.Context, reqID string) error {
+	return p.handler.CloseTerminal(ctx, p.hostID, reqID)
+}
+
+// compile-time check
+var _ TerminalProvider = (*agentTerminalProvider)(nil)

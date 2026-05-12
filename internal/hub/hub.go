@@ -71,14 +71,24 @@ type ComposeProvider interface {
 	WriteFile(ctx context.Context, workingDir, content string) error
 }
 
+// TerminalProvider abstracts exec/attach terminal sessions for a single host.
+// Local hosts use localTerminalProvider; remote agents use agentTerminalProvider.
+type TerminalProvider interface {
+	StartTerminal(ctx context.Context, cid, cmd string) (reqID string, output <-chan []byte, err error)
+	SendTerminalData(ctx context.Context, reqID string, data []byte) error
+	ResizeTerminal(ctx context.Context, reqID string, cols, rows uint) error
+	CloseTerminal(ctx context.Context, reqID string) error
+}
+
 type Hub struct {
 	store    *store.Store
 	log      *slog.Logger
 	retain   time.Duration
 	mu       sync.RWMutex
-	dockers  map[string]DockerProvider  // host_id -> docker
-	composes map[string]ComposeProvider // host_id -> compose
-	hosts    map[string]types.Host      // host_id -> host (cached)
+	dockers   map[string]DockerProvider   // host_id -> docker
+	composes  map[string]ComposeProvider  // host_id -> compose
+	terminals map[string]TerminalProvider // host_id -> terminal
+	hosts     map[string]types.Host       // host_id -> host (cached)
 	samples  chan types.MetricSample
 	// latestRich caches the most recent full sample per host including the
 	// live-only rich fields (per-core CPU, per-interface net, disk mounts, etc.)
@@ -112,6 +122,7 @@ func New(cfg Config) *Hub {
 		retain:     cfg.Retain,
 		dockers:    make(map[string]DockerProvider),
 		composes:   make(map[string]ComposeProvider),
+		terminals:  make(map[string]TerminalProvider),
 		hosts:      make(map[string]types.Host),
 		samples:    make(chan types.MetricSample, 256),
 		latestRich: make(map[string]types.MetricSample),
@@ -276,6 +287,42 @@ func (h *Hub) Compose(hostID string) (ComposeProvider, bool) {
 	defer h.mu.RUnlock()
 	p, ok := h.composes[hostID]
 	return p, ok
+}
+
+// RegisterTerminal attaches a terminal provider for a host.
+func (h *Hub) RegisterTerminal(hostID string, p TerminalProvider) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.terminals[hostID] = p
+}
+
+// Terminal returns the terminal provider for a host, if one is registered.
+func (h *Hub) Terminal(hostID string) (TerminalProvider, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	p, ok := h.terminals[hostID]
+	return p, ok
+}
+
+// UnregisterDocker removes the docker provider for a host (e.g. on disconnect).
+func (h *Hub) UnregisterDocker(hostID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.dockers, hostID)
+}
+
+// UnregisterCompose removes the compose provider for a host (e.g. on disconnect).
+func (h *Hub) UnregisterCompose(hostID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.composes, hostID)
+}
+
+// UnregisterTerminal removes the terminal provider for a host (e.g. on disconnect).
+func (h *Hub) UnregisterTerminal(hostID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.terminals, hostID)
 }
 
 // LatestSample returns the most recently ingested full sample for a host.

@@ -83,7 +83,10 @@ func (l *Local) GetStack(ctx context.Context, project string) (*types.ComposeSta
 // StackAction runs a lifecycle subcommand (up, down, restart, pull, stop, start).
 // service is optional; empty targets all services. Returns combined stdout+stderr.
 func (l *Local) StackAction(ctx context.Context, project, workingDir, action, service string, extraArgs ...string) (string, error) {
-	args := []string{"--project-name", project}
+	var args []string
+	if project != "" {
+		args = append(args, "--project-name", project)
+	}
 	if workingDir != "" {
 		args = append(args, "--project-directory", workingDir)
 	}
@@ -106,7 +109,10 @@ func (l *Local) Logs(ctx context.Context, project, workingDir, service string, t
 	if tail <= 0 {
 		tail = 200
 	}
-	args := []string{"--project-name", project}
+	var args []string
+	if project != "" {
+		args = append(args, "--project-name", project)
+	}
 	if workingDir != "" {
 		args = append(args, "--project-directory", workingDir)
 	}

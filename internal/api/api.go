@@ -589,12 +589,18 @@ func (s *Server) containerTerminal(w http.ResponseWriter, r *http.Request) {
 	hostID := chi.URLParam(r, "id")
 	cid := chi.URLParam(r, "cid")
 
+	tp, ok := s.hub.Terminal(hostID)
+	if !ok {
+		writeErr(w, http.StatusServiceUnavailable, fmt.Errorf("terminal not available for this host"))
+		return
+	}
+
 	cmd := r.URL.Query().Get("cmd")
 	if cmd == "" {
 		cmd = "/bin/sh"
 	}
 
-	reqID, outCh, err := s.agentHandler.StartTerminal(r.Context(), hostID, cid, cmd)
+	reqID, outCh, err := tp.StartTerminal(r.Context(), cid, cmd)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("start terminal: %w", err))
 		return
@@ -604,11 +610,11 @@ func (s *Server) containerTerminal(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		s.agentHandler.CloseTerminal(context.Background(), hostID, reqID)
+		_ = tp.CloseTerminal(context.Background(), reqID)
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	defer s.agentHandler.CloseTerminal(context.Background(), hostID, reqID)
+	defer tp.CloseTerminal(context.Background(), reqID) //nolint:errcheck
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -625,7 +631,6 @@ func (s *Server) containerTerminal(w http.ResponseWriter, r *http.Request) {
 					cancel()
 					return
 				}
-				// We wrap in JSON for frontend
 				msg, _ := json.Marshal(map[string]interface{}{
 					"type": "data",
 					"data": base64.StdEncoding.EncodeToString(chunk),
@@ -645,10 +650,9 @@ func (s *Server) containerTerminal(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			break
 		}
-		
 		var frame struct {
 			Type string `json:"type"`
-			Data string `json:"data"` // base64 encoded by frontend
+			Data string `json:"data"` // base64 from frontend
 			Cols uint   `json:"cols"`
 			Rows uint   `json:"rows"`
 		}
@@ -657,11 +661,11 @@ func (s *Server) containerTerminal(w http.ResponseWriter, r *http.Request) {
 			case "input":
 				if frame.Data != "" {
 					if dec, err := base64.StdEncoding.DecodeString(frame.Data); err == nil {
-						_ = s.agentHandler.SendTerminalData(ctx, hostID, reqID, dec)
+						_ = tp.SendTerminalData(ctx, reqID, dec)
 					}
 				}
 			case "resize":
-				_ = s.agentHandler.ResizeTerminal(ctx, hostID, reqID, frame.Cols, frame.Rows)
+				_ = tp.ResizeTerminal(ctx, reqID, frame.Cols, frame.Rows)
 			}
 		}
 	}
@@ -1619,17 +1623,17 @@ func (s *Server) createCompose(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stacks, err := cp.DiscoverStacks(r.Context())
-	if err != nil || len(stacks) == 0 {
-		writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
-		return
-	}
-	for _, st := range stacks {
-		if st.WorkingDir == body.WorkingDir {
-			writeJSON(w, http.StatusCreated, st)
-			return
+	if err == nil {
+		for _, st := range stacks {
+			if st.WorkingDir == body.WorkingDir {
+				writeJSON(w, http.StatusCreated, st)
+				return
+			}
 		}
 	}
-	writeJSON(w, http.StatusCreated, stacks[len(stacks)-1])
+	// Stack not yet discoverable (e.g. not started, or compose ls returned an
+	// error). Return a minimal success so the caller can refresh the list.
+	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "working_dir": body.WorkingDir})
 }
 
 func (s *Server) deleteCompose(w http.ResponseWriter, r *http.Request) {

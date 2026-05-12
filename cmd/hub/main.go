@@ -85,7 +85,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Attach the local docker socket as the docker provider for this host.
+	// Attach the local docker socket as the docker/terminal provider for this host.
 	if dc, err := dockerctl.New(hostID); err != nil {
 		log.Warn("docker unavailable", "err", err)
 	} else if err := dc.Ping(ctx); err != nil {
@@ -93,6 +93,7 @@ func main() {
 		_ = dc.Close()
 	} else {
 		h.RegisterDocker(hostID, dc)
+		h.RegisterTerminal(hostID, hub.NewLocalTerminalProvider(dc))
 		log.Info("docker provider registered", "host_id", hostID)
 
 		// Attach the local compose provider (requires docker to be available).
