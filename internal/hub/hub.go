@@ -40,7 +40,7 @@ type DockerProvider interface {
 	Unpause(ctx context.Context, id string) error
 	Kill(ctx context.Context, id, signal string) error
 	Remove(ctx context.Context, id string, force, removeVolumes bool) error
-	Logs(ctx context.Context, id string, tail int) (string, error)
+	Logs(ctx context.Context, id string, tail int, since time.Time, timestamps bool) (string, error)
 	Inspect(ctx context.Context, id string) (*types.ContainerInspect, error)
 	UpdateResources(ctx context.Context, id string, update types.ResourceUpdate) error
 	ListNetworks(ctx context.Context) ([]types.DockerNetwork, error)

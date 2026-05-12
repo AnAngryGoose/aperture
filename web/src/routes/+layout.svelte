@@ -19,7 +19,7 @@
 	let clockTimer: ReturnType<typeof setInterval> | null = null;
 
 	const AUTH_PAGES = ['/login', '/setup'];
-	$: isAuthPage = AUTH_PAGES.includes(page.url.pathname);
+	let isAuthPage = $derived(AUTH_PAGES.includes(page.url.pathname));
 
 	async function checkAuth() {
 		if (isAuthPage) { authReady = true; return; }

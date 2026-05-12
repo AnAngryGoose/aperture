@@ -125,8 +125,16 @@ export const api = {
 		post(`/api/hosts/${hostID}/containers/${cid}/${action}`),
 	containerRemove: (hostID: string, cid: string, force = false) =>
 		del(`/api/hosts/${hostID}/containers/${cid}?force=${force}`),
-	containerLogs: async (hostID: string, cid: string, tail = 200) => {
-		const res = await fetch(`${API_BASE}/api/hosts/${hostID}/containers/${cid}/logs?tail=${tail}`);
+	containerLogs: async (
+		hostID: string,
+		cid: string,
+		opts: { tail?: number; since?: number; timestamps?: boolean } = {}
+	) => {
+		const { tail = 200, since, timestamps } = opts;
+		const p = new URLSearchParams({ tail: String(tail) });
+		if (since) p.set('since', String(since));
+		if (timestamps) p.set('timestamps', 'true');
+		const res = await fetch(`${API_BASE}/api/hosts/${hostID}/containers/${cid}/logs?${p}`);
 		if (!res.ok) throw new Error(`logs -> ${res.status}`);
 		return res.text();
 	},

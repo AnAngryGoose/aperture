@@ -161,6 +161,7 @@
 	<a href={`/hosts/${id}/containers`}>Containers</a>
 	<a href={`/hosts/${id}/compose`}>Compose</a>
 	<a href={`/hosts/${id}/networks`}>Networks</a>
+	<a href={`/hosts/${id}/logs`}>Logs</a>
 	<a href={`/hosts/${id}/volumes`}>Volumes</a>
 	<a href={`/hosts/${id}/images`} class="active">Images</a>
 </nav>

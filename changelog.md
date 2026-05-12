@@ -483,6 +483,72 @@ Phase 3 kickoff: deep Docker network management.
 - **`web/src/lib/api.ts`** — New wrapper functions for the backend network management endpoints.
 - **`web/src/routes/hosts/[id]/networks/+page.svelte`** — Replaced the placeholder with a functional management page. Includes a list view with inline deep-inspection of networks, visualization of connected containers, removal of networks, and a modal for creating new ones. Connect and disconnect functions integrated directly into the inspect view.
 
+## [0.3.0-alpha.4] — 2026-05-12
+
+Wave 2 — Security baseline. Adds a single-admin session authentication system to the hub. All management endpoints now require a valid session. Adds notification send timeouts and split build-tag CORS.
+
+### Added — Backend
+
+- **`internal/store/schema.sql`** — Two new tables: `auth_config` (single-row constrained by `CHECK (id = 1)`, stores the bcrypt hash of the admin password) and `sessions` (token PRIMARY KEY, created_at, expires_at). Both use `CREATE TABLE IF NOT EXISTS` so existing DBs gain them on next hub start without a migration step.
+- **`internal/store/store.go`** — Auth and session methods: `IsPasswordSet`, `GetPasswordHash`, `SetPasswordHash` (upserts the single `auth_config` row), `CreateSession` (inserts a session with 24h expiry), `ValidateSession` (checks token exists and has not expired), `DeleteSession` (logout), `PruneExpiredSessions` (bulk delete of expired rows; called hourly).
+- **`internal/api/auth.go`** (new) — Full auth handler file:
+  - `requireAuth` middleware: reads the `aperture_session` cookie and calls `store.ValidateSession`. Passes through unauthenticated requests when `IsPasswordSet` is false (first-run mode, so the setup page is reachable without auth). Returns 401 JSON otherwise.
+  - `authStatus` (`GET /api/auth/status`): returns `{configured, authenticated}`. Layout calls this on mount to decide whether to redirect to `/setup` or `/login`.
+  - `authSetup` (`POST /api/auth/setup`): first-run only; rejects if a password is already set. Hashes with bcrypt cost 12, calls `SetPasswordHash`, creates a session, sets the cookie.
+  - `authLogin` (`POST /api/auth/login`): `bcrypt.CompareHashAndPassword` against stored hash; on match creates a 32-byte random hex session token, inserts it into `sessions`, and sets a 24-hour HttpOnly + SameSite=Lax cookie.
+  - `authLogout` (`POST /api/auth/logout`): calls `DeleteSession` and overwrites the cookie with an expired value.
+  - `authChangePassword` (`POST /api/auth/change-password`): verifies current password with bcrypt, re-hashes the new password. Does not invalidate existing sessions (single-admin assumption).
+  - `PruneSessions(ctx, st)` — exported hourly pruner goroutine; called from `cmd/hub`.
+  - `newSessionToken()` — 32 bytes from `crypto/rand`, hex-encoded (64-char string, 256 bits of entropy).
+  - `setSessionCookie(w, token, duration)` — sets `aperture_session`: HttpOnly, SameSite=Lax, Path=/. Pass `token=""` to clear it.
+- **`internal/api/api.go`** — Router restructured into a public group (health, `auth/*`, `agents/ws`) and a `requireAuth`-protected inner group for all data and management endpoints. The agent WS endpoint carries its own token-based auth and is excluded from session auth.
+- **`internal/api/cors_dev.go`** (new, `//go:build dev`) — CORS middleware that allows `localhost`/`127.0.0.1` origins with `Access-Control-Allow-Credentials: true`. Only compiled with `-tags dev`. Replaces the always-on CORS previously hardcoded in the router.
+- **`internal/api/cors_prod.go`** (new, `//go:build !dev`) — No-op passthrough; in production the SPA is same-origin so CORS headers are unnecessary.
+- **`internal/alerts/notify.go`** — Each per-channel goroutine now creates its own 15-second deadline via `context.WithTimeout`. Previously goroutines inherited the dispatch context with no deadline; a hung webhook could hold a goroutine open indefinitely.
+- **`cmd/hub/main.go`** — Calls `go api.PruneSessions(ctx, st)` after server start.
+
+### Added — Frontend
+
+- **`web/src/lib/api.ts`** — `handleUnauthorized()` redirects to `/login` on any 401 response (except when already on an auth page); called from all fetch helpers. New `api.auth` object: `status()`, `setup(password)`, `login(password)`, `logout()`, `changePassword(current, next)`.
+- **`web/src/routes/+layout.svelte`** — Calls `api.auth.status()` on mount; renders a blank page until auth is confirmed, then conditionally shows header/footer only on non-auth pages. Auth pages render in a centered `.auth-page` wrapper.
+- **`web/src/routes/login/+page.svelte`** (new) — Login form with password input, error display, and redirect to `/` on success.
+- **`web/src/routes/setup/+page.svelte`** (new) — First-run setup form: password + confirm, minimum 8-character validation, submit blocked until valid. Redirects to `/` on success.
+- **`web/src/routes/settings/+page.svelte`** — Security section added: change-password form (current / new / confirm) and a Sign out button calling `api.auth.logout()` then navigating to `/login`.
+
+### Build
+
+- **`Makefile`** — `make dev` now passes `-tags dev` to `go run`: `$(GO) run -tags dev ./cmd/hub -interval 2s`. Without this tag the dev-CORS middleware is excluded and cross-origin API calls from the Vite dev server fail.
+
+---
+
+## [0.3.0-alpha.3] — 2026-05-12
+
+Wave 1 — Correctness pass. Fixes silent alert failures, terminal double-encoding, resolve timestamp drift, and several shell-argument bugs. Introduces the `TerminalProvider` interface and the shared `internal/agentproto` package.
+
+### Fixed — Backend
+
+- **`internal/store/store.go`** — `ListEnabledRulesFor` was missing `severity` from its SELECT (column 8 of 9 expected by `scanAlertRule`), causing the scan to fail with a column-count mismatch. The evaluator's hot path silently discarded these scan errors, meaning **no alert rules were ever being evaluated**. **Fix:** added `severity` to the column list. This was a total silent failure of the alert system.
+- **`internal/hub/agentws.go`** — Four terminal control methods (`StartTerminal`, `SendTerminalData`, `ResizeTerminal`, `CloseTerminal`) were double-encoding JSON: they called `json.Marshal(req)` then passed the resulting `[]byte` to `wsjson.Write`. `wsjson.Write` JSON-encodes its argument, so a `[]byte` is base64-encoded per the JSON spec and arrives on the agent as a JSON string, not an object. **Fix:** pass the struct directly to `wsjson.Write`.
+- **`internal/alerts/alerts.go`** — The `open` map stored `int64` event IDs. On resolve, `fire()` used `sample.Timestamp` as the event's `FiredAt` instead of the actual timestamp from when the alert originally fired. Resolve notifications therefore reported the wrong fire time. **Fix:** changed `open map[ruleHostKey]int64` → `open map[ruleHostKey]types.AlertEvent` (storing the full event). The original event is retrieved from the map on resolve so `FiredAt` carries the correct value.
+- **`internal/compose/compose.go`** — `StackAction` and `Logs` unconditionally prepended `--project-name <name>` even when the project name was empty, causing `docker compose` to reject the invocation. **Fix:** `--project-name` is only appended when non-empty.
+- **`internal/api/api.go`** — `createCompose` success fallback used `stacks[len(stacks)-1]` (the last stack in the discovered list, unrelated to the new stack) as the response body. **Fix:** return `{"ok": true, "working_dir": body.WorkingDir}`.
+
+### Added — Backend
+
+- **`internal/agentproto/frames.go`** (new package) — Shared wire-frame type definitions for the agent ↔ hub WebSocket protocol: frame-type constants (`TypeHello`, `TypeAck`, `TypeMetric`, `TypeHeartbeat`, `TypeDockerReq`, `TypeDockerResp`, `TypeComposeReq`, `TypeComposeResp`) and exported frame structs. **Why:** previously the frame types were inline structs defined independently in `agentws.go` and `cmd/agent/main.go`; a shared package removes the risk of silent type drift between the two ends.
+- **`internal/hub/hub.go`** — `TerminalProvider` interface (four methods: `StartTerminal`, `SendTerminalData`, `ResizeTerminal`, `CloseTerminal`) and a `terminals map[string]TerminalProvider` registry with `RegisterTerminal`, `Terminal`, `UnregisterTerminal` accessors. Also added `UnregisterDocker` and `UnregisterCompose` as public methods so `agentws.go` can clean up on disconnect without accessing hub internals directly. **Why:** terminal sessions were always routed through the agent WebSocket path even for the local host. The interface routes local terminals to `localTerminalProvider` and agent terminals to `agentTerminalProvider`.
+- **`internal/hub/terminal.go`** (new) — `localTerminalProvider` wrapping `dockerctl.Client` for terminal sessions on the local host. Owns a mutex-protected session map (`reqID → localTermSession`); each session holds the stdin writer, resize function, and close callback. Satisfies `TerminalProvider` with a compile-time assertion.
+- **`internal/hub/agentws.go`** — `agentTerminalProvider` added (delegates `StartTerminal`, `SendTerminalData`, `ResizeTerminal`, `CloseTerminal` to `AgentHandler` with a fixed `hostID`). Agent connect now calls `hub.RegisterTerminal`; agent disconnect uses the new public `Unregister*` hub methods.
+- **`cmd/hub/main.go`** — Constructs and registers `hub.NewLocalTerminalProvider(dc)` alongside the docker client registration.
+
+### Cleanup
+
+- Removed `check_db.go` — root-level `package main` that imported `github.com/mattn/go-sqlite3` (not in go.mod), blocking `go build ./...`.
+- Removed `scratch/dist_inspect.go`, `scratch/volcheck.go`, `export_state.md` — debug/scratch files.
+- Removed `web/.vscode/extensions.json` from git tracking (`git rm --cached`).
+
+---
+
 ## [Unreleased]
 
 Phase 3 continues: Deep Docker surface — Volumes and Images next.

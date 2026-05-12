@@ -564,13 +564,16 @@ func dispatchDocker(ctx context.Context, dc *dockerctl.Client, req dockerReqFram
 
 	case "logs":
 		var p struct {
-			Tail int `json:"tail"`
+			Tail       int   `json:"tail"`
+			Since      int64 `json:"since"`
+			Timestamps bool  `json:"timestamps"`
 		}
 		_ = json.Unmarshal(req.Params, &p)
-		if p.Tail == 0 {
-			p.Tail = 200
+		var since time.Time
+		if p.Since > 0 {
+			since = time.Unix(p.Since, 0)
 		}
-		logs, err := dc.Logs(ctx, req.CID, p.Tail)
+		logs, err := dc.Logs(ctx, req.CID, p.Tail, since, p.Timestamps)
 		if err != nil {
 			return nil, err
 		}

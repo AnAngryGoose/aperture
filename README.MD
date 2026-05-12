@@ -2,7 +2,7 @@
 
 A self-hosted homelab command center. One interface for system metrics, container management, alerts, and remote host monitoring — designed to replace Beszel, Portainer/Dockge, and Dozzle with a single coherent tool.
 
-**Current version: v0.3.0-alpha.3**
+**Current version: v0.3.0-alpha.4**
 
 ---
 
@@ -189,7 +189,7 @@ The hub is a single binary that serves both the API and the SvelteKit SPA.
 # → listening on :8080
 ```
 
-On first start it creates `aperture.db` in the working directory, registers the local machine as a host, and begins sampling metrics every 5 seconds.
+On first start it creates `aperture.db` in the working directory, registers the local machine as a host, and begins sampling metrics every 5 seconds. Open the dashboard — you'll be redirected to the one-time setup page to set an admin password before the UI is accessible.
 
 ### Hub configuration
 
@@ -564,6 +564,18 @@ When resolved, `"type"` is `"alert_resolved"` and `"resolved_at"` is an ISO time
 
 All endpoints are under `/api`. Responses are JSON.
 
+### Authentication
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/auth/status` | Returns `{configured, authenticated}`. Used by the layout to decide whether to redirect to `/setup` or `/login`. |
+| POST | `/api/auth/setup` | First-run only. Body: `{"password":"..."}`. Sets the admin password (bcrypt, cost 12) and creates a session. Returns 409 if a password is already set. |
+| POST | `/api/auth/login` | Body: `{"password":"..."}`. Validates the password and sets a 24-hour HttpOnly session cookie. |
+| POST | `/api/auth/logout` | Deletes the session and clears the cookie. |
+| POST | `/api/auth/change-password` | Body: `{"current":"...","new":"..."}`. Verifies the current password then re-hashes. |
+
+All endpoints except `/api/health`, `/api/auth/*`, and `/api/agents/ws` require a valid session cookie (`aperture_session`). Unauthenticated requests receive `401 {"error":"..."}`.
+
 ### System
 
 | Method | Path | Description |
@@ -632,11 +644,14 @@ All endpoints are under `/api`. Responses are JSON.
 
 ```sh
 # Run the hub with a short sample interval for faster feedback
-go run ./cmd/hub -interval 2s -web-dir web/build
+# -tags dev enables the CORS middleware for localhost origins (required for Vite dev server)
+go run -tags dev ./cmd/hub -interval 2s
 
-# Or use the Makefile target
+# Or use the Makefile target (automatically passes -tags dev)
 make dev
 ```
+
+The `-tags dev` build tag activates the CORS middleware that allows cross-origin requests from `localhost`/`127.0.0.1` origins with credentials. Without it, the session cookie cannot be sent from the Vite dev server to the hub.
 
 ### Frontend
 
@@ -646,13 +661,13 @@ npm install
 npm run dev      # Vite dev server on :5173, proxies API to :8080
 ```
 
-The Vite dev server auto-sets `VITE_API_BASE=http://localhost:8080`. The hub's CORS middleware allows `localhost` origins in any mode, so cross-origin requests work without any manual config.
+The Vite dev server auto-sets `VITE_API_BASE=http://localhost:8080`.
 
 ### Both together
 
 Terminal 1:
 ```sh
-make dev   # hub on :8080
+make dev   # hub on :8080, with -tags dev for CORS
 ```
 
 Terminal 2:
@@ -660,7 +675,7 @@ Terminal 2:
 cd web && npm run dev   # SPA on :5173
 ```
 
-Open `http://localhost:5173` for live-reload development.
+Open `http://localhost:5173` for live-reload development. On first run you'll be redirected to `/setup` to create a password.
 
 ### Project layout
 
@@ -670,6 +685,7 @@ aperture/
 │   ├── hub/            Hub binary (main.go)
 │   └── agent/          Agent binary (main.go)
 ├── internal/
+│   ├── agentproto/     Shared agent ↔ hub WebSocket frame types
 │   ├── alerts/         Threshold evaluator + notification senders
 │   │   ├── alerts.go   Evaluator: sustained-breach detection, auto-resolve
 │   │   ├── notify.go   Notifier: dispatch to channels, severity filtering
@@ -678,10 +694,10 @@ aperture/
 │   │   ├── ch_ntfy.go
 │   │   ├── ch_gotify.go
 │   │   └── ch_webhook.go
-│   ├── api/            HTTP handlers + chi router
+│   ├── api/            HTTP handlers + chi router + auth middleware
 │   ├── collector/      gopsutil-based local metric sampler
 │   ├── dockerctl/      Docker SDK wrapper
-│   ├── hub/            Orchestration + AgentHandler (WebSocket)
+│   ├── hub/            Orchestration + AgentHandler + TerminalProvider
 │   ├── store/          SQLite store + schema
 │   └── types/          Shared Go types
 ├── web/                SvelteKit 5 frontend
@@ -729,7 +745,7 @@ sqlite3 aperture.db "VACUUM;"
 ```
 
 **CORS errors in dev**
-Make sure you opened `http://localhost:5173` (the Vite dev server), not `:8080` directly, and that the hub is running on `:8080`.
+Make sure the hub is running with `make dev` (which passes `-tags dev`). Without that build tag the CORS middleware is compiled out and the browser rejects cross-origin requests from the Vite dev server. Also confirm you opened `http://localhost:5173`, not `:8080` directly.
 
 ### Agent
 

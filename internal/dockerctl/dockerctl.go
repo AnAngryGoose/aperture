@@ -176,14 +176,26 @@ func (c *Client) Remove(ctx context.Context, id string, force, removeVolumes boo
 	})
 }
 
-// Logs returns the last n lines of container logs.
-func (c *Client) Logs(ctx context.Context, id string, tail int) (string, error) {
-	if tail <= 0 {
-		tail = 200
+// Logs returns container logs. When since is non-zero all lines after that
+// timestamp are returned (no tail cap). Without since the last tail lines
+// are returned (default 200 when tail <= 0). Timestamps prepends each line
+// with an RFC3339Nano timestamp so callers can track position.
+func (c *Client) Logs(ctx context.Context, id string, tail int, since time.Time, timestamps bool) (string, error) {
+	opts := container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: timestamps,
 	}
-	r, err := c.cli.ContainerLogs(ctx, id, container.LogsOptions{
-		ShowStdout: true, ShowStderr: true, Tail: fmt.Sprintf("%d", tail),
-	})
+	if !since.IsZero() {
+		opts.Since = since.UTC().Format(time.RFC3339Nano)
+		opts.Tail = "all"
+	} else {
+		if tail <= 0 {
+			tail = 200
+		}
+		opts.Tail = fmt.Sprintf("%d", tail)
+	}
+	r, err := c.cli.ContainerLogs(ctx, id, opts)
 	if err != nil {
 		return "", err
 	}

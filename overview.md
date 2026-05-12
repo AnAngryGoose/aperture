@@ -4,7 +4,7 @@ A single pane of glass for homelab command-and-control. Aperture is a self-hoste
 
 ## What it does (current state)
 
-**v0.3.0-alpha.1** — Phase 2 complete: docker-compose stack management directly from the UI. Discovers all existing compose stacks automatically (no ownership, no migration), shows live service state per stack, and supports the full lifecycle (up, down, restart, pull, stop, start) at both stack and individual-service granularity. Per-stack compose file viewer/editor with Save + Deploy in one click. Aggregated and per-service log tailing. Create new stacks from scratch with a YAML editor and optional immediate start. Works identically for the local hub host and remote agent hosts. **v0.2.0-alpha.5** — Phase 1 complete: remote agent transport, token-based auth, exponential-backoff reconnect, and the agent onboarding wizard. **v0.2.0-alpha.4** — UI/UX quality-of-life pass: host status pills, per-host alert badges, stale/offline banners, quick container search, ESC-to-close, dynamic page titles, absolute-timestamp tooltips, global toast system. **v0.2.0-alpha.3** added chart UX improvements and extensible alert notification channels: Discord, Slack, ntfy, Gotify, and generic webhook, each with per-rule severity levels and configurable resolve notifications. **v0.2.0-alpha.2** added full Beszel monitoring parity. **v0.2.0-alpha.1** added rich live monitoring depth and complete container lifecycle. **v0.1.0** established the base foundation.
+**v0.3.0-alpha.4** — Wave 2: single-admin session auth, bcrypt password, HttpOnly session cookies, first-run setup page, login page, change-password UI, per-channel 15s notification timeout, build-tag CORS split. **v0.3.0-alpha.3** — Wave 1 correctness: fixed silent alert evaluation failure (missing SQL column), fixed terminal JSON double-encoding, fixed resolve timestamp drift, added `TerminalProvider` interface and `internal/agentproto` shared frame types. **v0.3.0-alpha.2** — Phase 3 kickoff: deep Docker network management. **v0.3.0-alpha.1** — Phase 2 complete: docker-compose stack management directly from the UI. Discovers all existing compose stacks automatically (no ownership, no migration), shows live service state per stack, and supports the full lifecycle (up, down, restart, pull, stop, start) at both stack and individual-service granularity. Per-stack compose file viewer/editor with Save + Deploy in one click. Aggregated and per-service log tailing. Create new stacks from scratch with a YAML editor and optional immediate start. Works identically for the local hub host and remote agent hosts. **v0.2.0-alpha.5** — Phase 1 complete: remote agent transport, token-based auth, exponential-backoff reconnect, and the agent onboarding wizard. **v0.2.0-alpha.4** — UI/UX quality-of-life pass: host status pills, per-host alert badges, stale/offline banners, quick container search, ESC-to-close, dynamic page titles, absolute-timestamp tooltips, global toast system. **v0.2.0-alpha.3** added chart UX improvements and extensible alert notification channels: Discord, Slack, ntfy, Gotify, and generic webhook, each with per-rule severity levels and configurable resolve notifications. **v0.2.0-alpha.2** added full Beszel monitoring parity. **v0.2.0-alpha.1** added rich live monitoring depth and complete container lifecycle. **v0.1.0** established the base foundation.
 
 - Auto-discovers the local host, samples its system metrics every few seconds, and stores them in SQLite. Live snapshot is cached in-memory to carry rich fields (per-core CPU, per-interface network, all disk mounts, disk I/O, temps, process list) that are not stored historically. Three new tables (`net_iface_metrics`, `disk_mount_metrics`, `disk_io_metrics`) store per-entity historical data for charting.
 - Lists all docker containers on the host with live CPU/memory stats.
@@ -76,22 +76,24 @@ When remote agents land, `cmd/agent` (currently a placeholder) will run on each 
 ```
 aperture/
 ├── cmd/
-│   ├── hub/        Hub binary entry point
-│   └── agent/      Future remote-agent binary (placeholder in v0.1)
+│   ├── hub/          Hub binary entry point
+│   └── agent/        Remote-agent binary
 ├── internal/
-│   ├── alerts/     Threshold rule evaluator (sustained-breach, auto-resolve)
-│   ├── api/        HTTP handlers + chi router + SPA fallback
-│   ├── collector/  Local system-metrics sampler (gopsutil)
-│   ├── dockerctl/  Docker engine wrapper (list, lifecycle, logs)
-│   ├── hub/        Orchestration: host registry, ingest loop, retention
-│   ├── store/      SQLite + schema.sql
-│   └── types/      Shared types across packages
-├── web/            SvelteKit project (UI)
-├── bin/            Build outputs (gitignored)
-├── Makefile        Build / run / dev / clean targets
-├── overview.md     This file
-├── technical.md    Per-function detail
-└── changelog.md    Versioned change history
+│   ├── agentproto/   Shared agent ↔ hub WebSocket frame types
+│   ├── alerts/       Threshold rule evaluator (sustained-breach, auto-resolve)
+│   ├── api/          HTTP handlers + chi router + auth middleware + SPA fallback
+│   ├── collector/    Local system-metrics sampler (gopsutil)
+│   ├── compose/      docker compose CLI wrapper
+│   ├── dockerctl/    Docker engine wrapper (list, lifecycle, logs, networks)
+│   ├── hub/          Orchestration: host registry, ingest loop, retention, TerminalProvider
+│   ├── store/        SQLite + schema.sql
+│   └── types/        Shared types across packages
+├── web/              SvelteKit project (UI)
+├── bin/              Build outputs (gitignored)
+├── Makefile          Build / run / dev / clean targets
+├── overview.md       This file
+├── technical.md      Per-function detail
+└── changelog.md      Versioned change history
 ```
 
 ## Prerequisites
@@ -141,7 +143,8 @@ Two terminals. Hub on :8080:
 
 ```sh
 make dev
-# (equivalent to `go run ./cmd/hub -interval 2s` — API only, no UI)
+# equivalent to: go run -tags dev ./cmd/hub -interval 2s
+# -tags dev compiles in the CORS middleware for localhost origins
 ```
 
 Vite dev server on :5173:
@@ -150,7 +153,7 @@ Vite dev server on :5173:
 cd web && npm run dev
 ```
 
-The dev server proxies API calls to the hub via `VITE_API_BASE` (defaulted to `http://localhost:8080` when `import.meta.env.DEV` is true). The hub's CORS middleware allows `localhost`/`127.0.0.1` origins in dev.
+The dev server proxies API calls to the hub via `VITE_API_BASE` (defaulted to `http://localhost:8080` when `import.meta.env.DEV` is true). The `-tags dev` build tag is required: it compiles the CORS middleware that allows cross-origin requests with credentials from `localhost`/`127.0.0.1`. Without it, the session cookie cannot be sent from the Vite dev server and all API calls will 401.
 
 ### Configuration
 
@@ -183,8 +186,15 @@ Avoid `kill -9` unless the hub has actually hung — the WAL journal is robust b
 
 All endpoints live under `/api`. Responses are JSON unless noted.
 
+All endpoints except `/api/health`, `/api/auth/*`, and `/api/agents/ws` require a valid session cookie (`aperture_session`). The 401 response is always `{"error":"..."}`.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
+| GET | `/api/auth/status` | Returns `{configured, authenticated}`. Layout calls this on mount to decide whether to redirect to `/setup` or `/login`. |
+| POST | `/api/auth/setup` | First-run only. Body: `{"password":"..."}`. Hashes the password (bcrypt cost 12) and creates a session. |
+| POST | `/api/auth/login` | Body: `{"password":"..."}`. On match, creates a 24-hour HttpOnly session cookie. |
+| POST | `/api/auth/logout` | Deletes the session and clears the cookie. |
+| POST | `/api/auth/change-password` | Body: `{"current":"...","new":"..."}`. Verifies current password, re-hashes the new one. |
 | GET | `/api/health` | Liveness probe. |
 | GET | `/api/system/info` | Hub version, started-at timestamp, SQLite DB path, and total on-disk size (`aperture.db` + `-wal` + `-shm`). Used by the layout footer. |
 | GET | `/api/hosts` | List all known hosts. |
@@ -216,7 +226,7 @@ All endpoints live under `/api`. Responses are JSON unless noted.
 
 - **`docker unavailable` on startup** — the user running the hub can't reach the docker socket. Add the user to the `docker` group or run with appropriate privileges. Metrics still work; container endpoints will 404.
 - **Empty charts** — charts need at least 2 samples in the requested range. Wait one or two `-interval` cycles.
-- **CORS errors in dev** — make sure you're hitting the dev server origin (`http://localhost:5173`); the hub allows that origin explicitly.
+- **CORS errors in dev** — make sure the hub is running with `make dev` (passes `-tags dev`). Without that build tag the CORS middleware is compiled out and cross-origin requests from the Vite dev server are rejected. Also confirm you're hitting `http://localhost:5173`, not `:8080` directly.
 - **`port already in use`** — change `-listen`, e.g. `-listen :8081`.
 - **High memory growth** — set `-retain` lower, or run `VACUUM` on the SQLite file periodically. Pruning runs hourly when retention > 0.
 

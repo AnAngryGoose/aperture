@@ -532,8 +532,12 @@ func (p *agentDockerProvider) Remove(ctx context.Context, id string, force, remo
 	return err
 }
 
-func (p *agentDockerProvider) Logs(ctx context.Context, id string, tail int) (string, error) {
-	params := marshalParams(map[string]any{"tail": tail})
+func (p *agentDockerProvider) Logs(ctx context.Context, id string, tail int, since time.Time, timestamps bool) (string, error) {
+	params := marshalParams(map[string]any{
+		"tail":       tail,
+		"since":      since.Unix(),
+		"timestamps": timestamps,
+	})
 	data, err := p.handler.sendDockerCmd(ctx, p.hostID, "logs", id, params)
 	if err != nil {
 		return "", err

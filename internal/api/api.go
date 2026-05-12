@@ -567,10 +567,14 @@ func (s *Server) containerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
-	if tail == 0 {
-		tail = 200
+	timestamps := r.URL.Query().Get("timestamps") == "true"
+	var since time.Time
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if sinceUnix, err := strconv.ParseInt(sinceStr, 10, 64); err == nil && sinceUnix > 0 {
+			since = time.Unix(sinceUnix, 0)
+		}
 	}
-	logs, err := d.Logs(r.Context(), cid, tail)
+	logs, err := d.Logs(r.Context(), cid, tail, since, timestamps)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return

@@ -65,6 +65,13 @@ SQLite wrapper. Uses `modernc.org/sqlite` (pure-Go) so the binary cross-compiles
 | `NetIfaceRange(ctx, hostID, since, until, maxPoints)` | Fetches `net_iface_metrics` rows in range, groups by timestamp in Go, applies stride downsampling on unique timestamps (always keeping the last), and pivots into `*types.NetIfaceHistory` using a `tsIndex` map for O(1) slot lookup when filling pre-allocated series arrays. Returns a non-nil empty struct (not `nil`) when no data exists. |
 | `DiskMountRange` / `DiskIORange` | Same downsampling + pivot pattern for their respective tables. |
 | `PruneMetrics(cutoff)` | Bulk delete of old samples from all four tables (`metrics`, `net_iface_metrics`, `disk_mount_metrics`, `disk_io_metrics`). Called hourly from `hub.retentionLoop` when a retention duration is configured. Returns total rows-deleted across all tables so the caller can log non-zero prunings. |
+| `IsPasswordSet(ctx)` | Returns whether the `auth_config` table contains a password hash row. Used by `requireAuth` to decide whether to enforce auth or pass through (first-run mode). |
+| `GetPasswordHash(ctx)` | Returns the stored bcrypt hash, or `("", nil)` when no password is set. |
+| `SetPasswordHash(ctx, hash)` | Upserts the single `auth_config` row (id=1). Safe to call on first setup and on password change — the constraint ensures there is always exactly one row. |
+| `CreateSession(ctx, token)` | Inserts a new row into `sessions` with `expires_at = now + 24h`. The token is stored as-is (the caller — `authLogin` / `authSetup` — generates a random token; no additional hashing at this layer). |
+| `ValidateSession(ctx, token)` | Looks up the token and checks `expires_at > now`. Returns `true` when valid. Does not bump expiry — sessions are fixed-duration for simplicity. |
+| `DeleteSession(ctx, token)` | Removes the session row. Called by `authLogout`. |
+| `PruneExpiredSessions(ctx)` | Bulk `DELETE FROM sessions WHERE expires_at < now`. Returns the number of deleted rows. Called hourly from `api.PruneSessions`. |
 | `scanAlertRule(rs)` | Internal helper that scans a row into `types.AlertRule`. `host_id` is a `sql.NullString` because `NULL` legitimately means "all hosts"; this conversion is the only place that abstraction leaks across. Centralizing it stops every list method from reimplementing the same scan shape. |
 | `ListAlertRules(hostID *string)` | UI listing. When `hostID` is non-nil, returns only rules that apply to that host (its id or `NULL`). Used by the frontend's per-host filtering and by the global rules table. |
 | `ListEnabledRulesFor(hostID)` | Evaluator hot path. Same filter as `ListAlertRules` but restricted to `enabled = 1`. Called once per metric ingest, so the index is implicitly: filter on a small column with a small predicate, scan a small table. At homelab scale a full scan per ingest is fine. |
@@ -149,7 +156,7 @@ Rehydration: on `New(...)`, the evaluator loads all open events and seeds its `o
 
 | Name | Purpose |
 | --- | --- |
-| `Notifier` | Loads enabled channels from the store and dispatches per-channel. `Dispatch(ctx, event, rule, resolved)` loads the host row (for name), filters channels by `SeverityLevel(ch.MinSeverity) <= SeverityLevel(rule.Severity)` and `ch.NotifyResolve`, then fires a goroutine per channel. One DB query for host + one for channels per dispatch; acceptable for low-frequency alert events. |
+| `Notifier` | Loads enabled channels from the store and dispatches per-channel. `Dispatch(ctx, event, rule, resolved)` loads the host row (for name), filters channels by `SeverityLevel(ch.MinSeverity) <= SeverityLevel(rule.Severity)` and `ch.NotifyResolve`, then fires a goroutine per channel. Each goroutine creates its own `context.WithTimeout(context.Background(), 15*time.Second)` so a hung webhook cannot hold a goroutine open indefinitely. One DB query for host + one for channels per dispatch; acceptable for low-frequency alert events. |
 | `SeverityLevel(s)` | `"info"→0`, `"warning"→1`, `"critical"→2`. Exported so the API can use it for validation if needed. |
 | `BuildSender(ch)` | Exported wrapper around `buildSender(ch)` so the `testAlertChannel` API handler can validate a channel's config without a full Dispatch. |
 | `DiscordSender` | POSTs a rich embed to a Discord incoming webhook. Embed color is severity-coded (`#e74c3c` critical, `#f39c12` warning, `#3498db` info, `#2ecc71` resolved). |
@@ -181,6 +188,11 @@ Orchestration layer. Owns the host registry, the central metric ingest channel, 
 | `(*Hub).RegisterDocker(hostID, p)` / `Docker(hostID)` | Concurrent-safe registry of docker providers by host. The API uses `Docker` to dispatch container endpoints. |
 | `ComposeProvider` interface | Six-method seam for compose stack operations: `DiscoverStacks`, `GetStack`, `StackAction`, `Logs`, `ReadFile`, `WriteFile`. Local hosts use `compose.Local`; remote agents satisfy it via `agentComposeProvider` in `agentws.go`. |
 | `(*Hub).RegisterCompose(hostID, p)` / `Compose(hostID)` | Parallel to the docker registry. Registered when the local docker socket is available (hub) or when `hello.HasCompose` is true (agent). The API returns 503 if no provider is registered for a host. |
+| `TerminalProvider` interface | Four-method seam for interactive terminal sessions: `StartTerminal(ctx, cid, cmd) (reqID string, output <-chan []byte, err error)`, `SendTerminalData(ctx, reqID, data []byte)`, `ResizeTerminal(ctx, reqID, cols, rows uint)`, `CloseTerminal(ctx, reqID)`. Allows the API to route terminal sessions to either `localTerminalProvider` (local Docker socket) or `agentTerminalProvider` (remote agent WebSocket) without the handler knowing which transport is in use. |
+| `(*Hub).RegisterTerminal(hostID, p)` / `Terminal(hostID)` / `UnregisterTerminal(hostID)` | Concurrent-safe registry of terminal providers by host, parallel to the docker and compose registries. The local provider is registered at hub startup; agent providers are registered on agent connect and removed on disconnect. |
+| `(*Hub).UnregisterDocker(hostID)` / `UnregisterCompose(hostID)` | Public helpers so `agentws.go` can clean up all three registries on agent disconnect without accessing hub struct fields directly. |
+| `localTerminalProvider` (`internal/hub/terminal.go`) | Implements `TerminalProvider` for the local hub host. Wraps `dockerctl.Client`'s exec API. Owns a mutex-protected `sessions map[string]*localTermSession`; each session holds the stdin `io.WriteCloser`, a resize callback, and a close function. The `reqID` counter is an atomic int64 so session IDs are unique and allocation-free. A compile-time `var _ TerminalProvider = (*localTerminalProvider)(nil)` assertion catches drift. |
+| `agentTerminalProvider` (`internal/hub/agentws.go`) | Implements `TerminalProvider` for a remote agent host. Each method delegates to `AgentHandler` with a fixed `hostID`, forwarding the call as a WebSocket frame and waiting on a pending channel. Same pattern as `agentDockerProvider` but for the `TypeTerminalReq` / `TypeTerminalResp` frame types. |
 | `(*Hub).Store()` | Exposes the store for the API package. The alternative — passing the store separately — would require keeping two pointers in lockstep; one accessor is simpler. |
 | `DeriveHostID(info)` | First 16 hex chars of `sha1(source + "|" + name)`. Stable across restarts so historical metrics stay linked to the same host record. When remote agents land, they will provide their own UUID and this is fallback for the local source only. |
 | `Evaluator` interface | One-method seam (`Evaluate(ctx, sample)`) the hub uses to dispatch persisted samples to the alert evaluator. Defined on the hub side (rather than imported from `internal/alerts`) to avoid an import cycle: `alerts` imports `store` for its types and rules, and the hub imports neither. `*alerts.Evaluator` satisfies it; tests can substitute a stub. |
@@ -216,7 +228,7 @@ HTTP layer. chi-based, all routes under `/api`. The same handler can optionally 
 | `writeJSON`, `writeErr` | Tiny helpers; `writeErr` returns `{error: string}` consistently so the frontend's `api.ts` can extract a message uniformly. |
 | `listNetworks`, `inspectNetwork`, `createNetwork`, `removeNetwork`, `connectNetwork`, `disconnectNetwork` | New routes under `/api/hosts/{id}/networks/` that delegate to `DockerProvider` network methods, supporting list, deep-inspect (with connected containers), creation, removal, and container connection lifecycle. |
 | `parseDuration(s, def)` | `time.ParseDuration` with a default fallback. Why a wrapper: inline `if s == "" || ...` was repeating; this clarifies intent. |
-| `corsForDev` | Allow-lists `localhost`/`127.0.0.1` origins so the SvelteKit dev server can hit the hub during development. In production, same-origin means this is a no-op. Keeping it permanently in the chain (rather than a build flag) avoids the "forgot to enable for dev" trap. |
+| `corsForDev` | Split into two build-tagged files. `cors_dev.go` (`//go:build dev`): allows `localhost`/`127.0.0.1` origins with `Access-Control-Allow-Credentials: true` so the Vite dev server can send the session cookie to the hub. `cors_prod.go` (`//go:build !dev`): no-op passthrough — in production the SPA is same-origin so no CORS headers are needed. Build the hub with `-tags dev` (or `make dev`) to get the permissive middleware. |
 | `alertsMetadata` | Returns `{metrics, ops}` from the alerts package's canonical lists. Used by the UI to populate dropdowns so the metric-name vocabulary has a single source of truth. |
 | `listAlertRules` | Reads the optional `host_id` query and forwards to `store.ListAlertRules`. Returns `[]` (not `null`) on empty so the frontend never null-checks. |
 | `alertRulePayload` (struct) | Wire DTO for create + update. Differences from `types.AlertRule`: `host_id` is a plain string (empty = "all hosts" — the empty/NULL mapping happens in `toRule`); `enabled` is a `*bool` so omitting it on create defaults to `true` rather than silently disabling the rule. |
@@ -226,6 +238,15 @@ HTTP layer. chi-based, all routes under `/api`. The same handler can optionally 
 | `updateAlertRule` | Same shape as create: decode → validate → update → read back. |
 | `deleteAlertRule` | Calls `store.DeleteAlertRule` (which cascades event history) then `evaluator.HandleRuleDelete` so transient pending/open entries don't leak. |
 | `listAlertEvents` | Builds a `store.AlertEventFilter` from `host_id`, `open`, and `limit` query params. Default `limit` 200; the frontend asks for 100 on the alerts page and 200 for the layout's open-count badge. |
+| `requireAuth` (middleware) | Reads the `aperture_session` cookie and calls `store.ValidateSession`. Passes through unauthenticated requests when `IsPasswordSet` is false (first-run mode, so the setup page is reachable). Returns `401 {"error":"..."}` otherwise. Applied via a chi inner group that covers all data and management endpoints; health, `auth/*`, and `agents/ws` are outside that group. |
+| `authStatus` | `GET /api/auth/status`. Returns `{configured: bool, authenticated: bool}`. The layout calls this on mount to decide whether to redirect to `/setup`, `/login`, or proceed normally. |
+| `authSetup` | `POST /api/auth/setup`. First-run only — returns 409 if a password is already configured. Hashes the submitted password with bcrypt (cost 12), calls `SetPasswordHash`, creates a session, and sets the cookie. |
+| `authLogin` | `POST /api/auth/login`. Calls `bcrypt.CompareHashAndPassword`; on match creates a 32-byte random hex token, inserts it with a 24-hour expiry into `sessions`, and sets an HttpOnly + SameSite=Lax `aperture_session` cookie. |
+| `authLogout` | `POST /api/auth/logout`. Deletes the current session from the DB and overwrites the cookie with an expired value. |
+| `authChangePassword` | `POST /api/auth/change-password`. Verifies the current password via bcrypt, then re-hashes the new password and calls `SetPasswordHash`. Does not invalidate the current session (single-admin assumption). |
+| `PruneSessions(ctx, st)` | Exported hourly pruner. `cmd/hub` starts it as `go api.PruneSessions(ctx, st)`. Loops on a 1-hour ticker, calling `store.PruneExpiredSessions` and logging the count of deleted rows. |
+| `newSessionToken()` | Generates 32 bytes from `crypto/rand` and hex-encodes them. The resulting 64-character string gives 256 bits of entropy. Only ever stored hashed in the `sessions` table. |
+| `setSessionCookie(w, token, duration)` | Sets the `aperture_session` cookie with HttpOnly, SameSite=Lax, Path=/. Passing `token=""` and a negative duration clears the cookie (used by logout). |
 
 ### `cmd/hub`
 
@@ -254,6 +275,19 @@ New package (`compose.go`). `Local` wraps the `docker compose` CLI (or `docker-c
 | `ReadFile / WriteFile` | `os.ReadFile` / `os.WriteFile` against the first compose filename found by `FindComposeFile`. `WriteFile` creates the directory and defaults to `compose.yml` when no file exists. |
 | `ParseLS(stdout)` | Handles `[]lsEntry` JSON array. Infers `WorkingDir` from `ConfigFiles` (dirname of first path). |
 | `ParsePS(stdout)` | Handles both JSON array (Compose v2.23+) and NDJSON (older). Sorts services by name. |
+
+### `internal/agentproto`
+
+Shared wire-frame type definitions for the agent ↔ hub WebSocket protocol. Both `internal/hub/agentws.go` (hub side) and `cmd/agent/main.go` (agent side) import this package so the frame shapes cannot silently drift between the two binary endpoints.
+
+| Export | Content |
+| --- | --- |
+| Frame-type constants | `TypeHello`, `TypeAck`, `TypeMetric`, `TypeHeartbeat`, `TypeDockerReq`, `TypeDockerResp`, `TypeComposeReq`, `TypeComposeResp` — string constants used as the `"type"` discriminator field in every JSON frame. |
+| `HelloFrame` | Sent by the agent immediately after the WebSocket upgrade. Carries `HostInfo`, `Version`, `HasDocker`, `HasCompose`. |
+| `AckFrame` | Hub → agent reply to hello; carries the assigned `HostID`. |
+| `MetricFrame` | Agent → hub; wraps `types.MetricSample`. |
+| `DockerReqFrame` / `DockerRespFrame` | Hub → agent / agent → hub; carry `ReqID`, `Action`, `CID`, and a JSON `Params` blob for requests; `OK`, `Data`, and `Error` for responses. |
+| `ComposeReqFrame` / `ComposeRespFrame` | Same pattern for compose operations. |
 
 ---
 
@@ -378,6 +412,7 @@ This whole loop avoids per-request locks beyond the SQLite WAL and the small RWM
 
 ## Known design choices worth flagging
 
-- **No SSE/WebSocket yet.** Polling is simpler and the data is small. We'll switch to push when remote agents land — they'll already be pushing, so the hub will push to the UI naturally then.
-- **Auth absent.** Single-user homelab assumption. Adding it later is non-disruptive because the API is namespaced under `/api` and middleware injection is trivial in chi.
+- **WebSocket terminal only; no SSE push to the UI.** The browser UI still polls most endpoints every 5s. The agent WebSocket already pushes metrics to the hub; push-to-browser is a future step once the UI stabilizes.
+- **Single-admin auth only.** The `auth_config` table uses `CHECK (id = 1)` to enforce one row. Multi-user RBAC is roadmap section 8 — the middleware injection point is already in chi.
 - **No embedded frontend yet.** `-web-dir` is the seam. `embed.FS` lands when the project is more stable; embedding now would slow Go-only iteration cycles.
+- **`InsecureSkipVerify: true` on agent WS accepts.** The agent WebSocket upgrade uses a TLS config that skips certificate verification. Token-based auth is enforced at the application layer. mTLS is the planned upgrade path for a future version.

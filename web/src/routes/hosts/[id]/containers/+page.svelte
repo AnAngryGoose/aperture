@@ -126,7 +126,7 @@
 		logsText = 'loading…';
 		logsSearch = '';
 		try {
-			logsText = await api.containerLogs(id, cid, 1000);
+			logsText = await api.containerLogs(id, cid, { tail: 1000 });
 		} catch (e) {
 			logsText = `error: ${(e as Error).message}`;
 		}
@@ -284,8 +284,9 @@
 	<a href={`/hosts/${id}`}>Overview</a>
 	<a href={`/hosts/${id}/containers`} class="active">Containers</a>
 	<a href={`/hosts/${id}/compose`}>Compose</a>
-	<a href={`/hosts/${id}/networks`} class="">Networks</a>
-	<a href={`/hosts/${id}/volumes`} class="">Volumes</a>
+	<a href={`/hosts/${id}/networks`}>Networks</a>
+	<a href={`/hosts/${id}/logs`}>Logs</a>
+	<a href={`/hosts/${id}/volumes`}>Volumes</a>
 	<a href={`/hosts/${id}/images`}>Images</a>
 </nav>
 

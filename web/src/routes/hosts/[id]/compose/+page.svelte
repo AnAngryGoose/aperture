@@ -320,8 +320,9 @@
 		<a href={`/hosts/${id}`}>Overview</a>
 		<a href={`/hosts/${id}/containers`}>Containers</a>
 		<a href={`/hosts/${id}/compose`} class="active">Compose</a>
-		<a href={`/hosts/${id}/networks`} class="">Networks</a>
-		<a href={`/hosts/${id}/volumes`} class="">Volumes</a>
+		<a href={`/hosts/${id}/networks`}>Networks</a>
+		<a href={`/hosts/${id}/logs`}>Logs</a>
+		<a href={`/hosts/${id}/volumes`}>Volumes</a>
 		<a href={`/hosts/${id}/images`}>Images</a>
 	</nav>
 
