@@ -1041,8 +1041,8 @@ func (s *Store) GetComposeVersion(ctx context.Context, id int64) (*types.Compose
 	var v types.ComposeVersion
 	var t time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, host_id, project, created_at, yaml_content 
-		FROM compose_versions 
+		SELECT id, host_id, project, created_at, yaml_content
+		FROM compose_versions
 		WHERE id = ?`, id).Scan(&v.ID, &v.HostID, &v.Project, &t, &v.Content)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1052,4 +1052,66 @@ func (s *Store) GetComposeVersion(ctx context.Context, id int64) (*types.Compose
 	}
 	v.CreatedAt = t.Format(time.RFC3339)
 	return &v, nil
+}
+
+// --- auth ---
+
+// IsPasswordSet reports whether an admin password has been configured.
+func (s *Store) IsPasswordSet(ctx context.Context) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_config`).Scan(&n)
+	return n > 0, err
+}
+
+// GetPasswordHash retrieves the stored bcrypt hash. Returns ("", nil) if no
+// password has been set yet.
+func (s *Store) GetPasswordHash(ctx context.Context) (string, error) {
+	var h string
+	err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM auth_config WHERE id = 1`).Scan(&h)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return h, err
+}
+
+// SetPasswordHash upserts the bcrypt hash for the single admin account.
+func (s *Store) SetPasswordHash(ctx context.Context, hash string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO auth_config (id, password_hash) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, created_at = CURRENT_TIMESTAMP`,
+		hash)
+	return err
+}
+
+// CreateSession stores a new session token with an expiry time.
+func (s *Store) CreateSession(ctx context.Context, token string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (token, expires_at) VALUES (?, ?)`, token, expiresAt)
+	return err
+}
+
+// ValidateSession returns true if the token exists and has not expired.
+func (s *Store) ValidateSession(ctx context.Context, token string) (bool, error) {
+	var exp time.Time
+	err := s.db.QueryRowContext(ctx,
+		`SELECT expires_at FROM sessions WHERE token = ?`, token).Scan(&exp)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return time.Now().Before(exp), nil
+}
+
+// DeleteSession removes a session (logout).
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	return err
+}
+
+// PruneExpiredSessions removes sessions whose expiry has passed.
+func (s *Store) PruneExpiredSessions(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP`)
+	return err
 }

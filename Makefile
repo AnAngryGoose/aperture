@@ -24,8 +24,8 @@ tidy: ## go mod tidy
 run: hub ## run the hub (after `make web`) at http://localhost:8080
 	$(BIN)/aperture-hub -web-dir $(WEBDIR)/build
 
-dev: ## run hub (API only) on :8080 — pair with `cd web && npm run dev` on :5173
-	$(GO) run ./cmd/hub -interval 2s
+dev: ## run hub (API only, dev CORS) on :8080 — pair with `cd web && npm run dev` on :5173
+	$(GO) run -tags dev ./cmd/hub -interval 2s
 
 clean:
 	rm -rf $(BIN) $(WEBDIR)/build $(WEBDIR)/.svelte-kit

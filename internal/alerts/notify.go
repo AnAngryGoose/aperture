@@ -81,7 +81,11 @@ func (n *Notifier) Dispatch(ctx context.Context, event types.AlertEvent, rule ty
 			continue
 		}
 		go func(s Sender, cid int64, cname string) {
-			if err := s.Send(ctx, notif); err != nil {
+			// Bound each outbound HTTP call: a hung webhook must not block
+			// a goroutine indefinitely.
+			sendCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := s.Send(sendCtx, notif); err != nil {
 				n.log.Error("notifier: send", "channel_id", cid, "name", cname, "err", err)
 			} else {
 				n.log.Info("notifier: sent", "channel_id", cid, "name", cname, "resolved", resolved)

@@ -136,3 +136,19 @@ CREATE TABLE IF NOT EXISTS compose_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_compose_versions_lookup ON compose_versions(host_id, project);
 
+-- Auth: single-row table holding the bcrypt-hashed admin password.
+-- The CHECK constraint enforces at most one row; REPLACE INTO resets the password.
+CREATE TABLE IF NOT EXISTS auth_config (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    password_hash TEXT NOT NULL,
+    created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Sessions: short-lived bearer tokens issued on successful login.
+-- Expired rows are pruned lazily on store open and periodically at runtime.
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL
+);
+

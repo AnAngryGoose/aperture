@@ -76,6 +76,9 @@ func main() {
 		}
 	}()
 
+	// Prune expired sessions in the background.
+	go api.PruneSessions(ctx, st)
+
 	// Register the local machine as a metric source.
 	local := collector.NewLocal(*interval)
 	local.DiskPath = *diskPath

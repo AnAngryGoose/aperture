@@ -67,80 +67,94 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 	r.Use(corsForDev)
 
 	r.Route("/api", func(r chi.Router) {
+		// Public endpoints — no auth required.
 		r.Get("/health", s.health)
-		r.Get("/system/info", s.systemInfo)
-		r.Get("/hosts", s.listHosts)
-		r.Get("/hosts/{id}", s.getHost)
-		r.Get("/hosts/{id}/metrics/latest", s.latestMetric)
-		r.Get("/hosts/{id}/metrics/net", s.netIfaceHistory)
-		r.Get("/hosts/{id}/metrics/mounts", s.diskMountHistory)
-		r.Get("/hosts/{id}/metrics/diskio", s.diskIOHistory)
-		r.Get("/hosts/{id}/metrics", s.metricsRange)
-		r.Get("/hosts/{id}/containers", s.listContainers)
-		r.Post("/hosts/{id}/containers", s.containerCreate)
-		// Specific container sub-routes must be registered before the
-		// parameterized /{action} route so chi prefers them on exact match.
-		r.Get("/hosts/{id}/containers/{cid}/inspect", s.containerInspect)
-		r.Get("/hosts/{id}/containers/{cid}/logs", s.containerLogs)
-		r.Get("/hosts/{id}/containers/{cid}/terminal", s.containerTerminal)
-		r.Put("/hosts/{id}/containers/{cid}/resources", s.containerUpdateResources)
-		r.Post("/hosts/{id}/containers/{cid}/recreate", s.containerRecreate)
-		r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
-		r.Delete("/hosts/{id}/containers/{cid}", s.containerRemove)
-
-		// Network management.
-		r.Get("/hosts/{id}/networks", s.listNetworks)
-		r.Post("/hosts/{id}/networks", s.createNetwork)
-		r.Get("/hosts/{id}/networks/{net_id}", s.inspectNetwork)
-		r.Delete("/hosts/{id}/networks/{net_id}", s.removeNetwork)
-		r.Post("/hosts/{id}/networks/{net_id}/connect", s.connectNetwork)
-		r.Post("/hosts/{id}/networks/{net_id}/disconnect", s.disconnectNetwork)
-
-		// Volume management.
-		r.Get("/hosts/{id}/volumes", s.listVolumes)
-		r.Post("/hosts/{id}/volumes", s.createVolume)
-		r.Get("/hosts/{id}/volumes/{name}", s.inspectVolume)
-		r.Delete("/hosts/{id}/volumes/{name}", s.removeVolume)
-
-		// Images
-		r.Get("/hosts/{id}/images", s.listImages)
-		r.Get("/hosts/{id}/images/{img}", s.inspectImage)
-		r.Delete("/hosts/{id}/images/{img}", s.removeImage)
-		r.Post("/hosts/{id}/images/pull", s.pullImage)
-		r.Get("/hosts/{id}/images/{img}/update-check", s.checkImageUpdate)
-
-		// Compose stack management. Specific sub-routes registered before /{action}.
-		r.Get("/hosts/{id}/compose", s.listCompose)
-		r.Post("/hosts/{id}/compose", s.createCompose)
-		r.Get("/hosts/{id}/compose/{project}/file", s.composeReadFile)
-		r.Put("/hosts/{id}/compose/{project}/file", s.composeWriteFile)
-		r.Get("/hosts/{id}/compose/{project}/versions", s.composeVersions)
-		r.Get("/hosts/{id}/compose/versions/{vid}", s.composeVersionContent)
-		r.Get("/hosts/{id}/compose/{project}/logs", s.composeLogs)
-		r.Get("/hosts/{id}/compose/{project}", s.getCompose)
-		r.Post("/hosts/{id}/compose/{project}/{action}", s.composeAction)
-		r.Delete("/hosts/{id}/compose/{project}", s.deleteCompose)
-
-		// Agent WebSocket and token management.
+		r.Get("/auth/status", s.authStatus)
+		r.Post("/auth/setup", s.authSetup)
+		r.Post("/auth/login", s.authLogin)
+		// Agent WebSocket uses its own bearer-token auth independent of sessions.
 		r.Get("/agents/ws", s.agentHandler.ServeHTTP)
-		r.Get("/agents/tokens", s.listAgentTokens)
-		r.Post("/agents/tokens", s.createAgentToken)
-		r.Delete("/agents/tokens/{id}", s.revokeAgentToken)
-		r.Get("/agents/connected", s.connectedAgents)
 
-		r.Get("/alerts/metadata", s.alertsMetadata)
-		r.Get("/alerts/rules", s.listAlertRules)
-		r.Post("/alerts/rules", s.createAlertRule)
-		r.Get("/alerts/rules/{id}", s.getAlertRule)
-		r.Put("/alerts/rules/{id}", s.updateAlertRule)
-		r.Delete("/alerts/rules/{id}", s.deleteAlertRule)
-		r.Get("/alerts/events", s.listAlertEvents)
-		r.Get("/alerts/channels", s.listAlertChannels)
-		r.Post("/alerts/channels", s.createAlertChannel)
-		r.Get("/alerts/channels/{id}", s.getAlertChannel)
-		r.Put("/alerts/channels/{id}", s.updateAlertChannel)
-		r.Delete("/alerts/channels/{id}", s.deleteAlertChannel)
-		r.Post("/alerts/channels/{id}/test", s.testAlertChannel)
+		// All other endpoints require a valid session.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireAuth)
+
+			r.Post("/auth/logout", s.authLogout)
+			r.Post("/auth/password", s.authChangePassword)
+
+			r.Get("/system/info", s.systemInfo)
+			r.Get("/hosts", s.listHosts)
+			r.Get("/hosts/{id}", s.getHost)
+			r.Get("/hosts/{id}/metrics/latest", s.latestMetric)
+			r.Get("/hosts/{id}/metrics/net", s.netIfaceHistory)
+			r.Get("/hosts/{id}/metrics/mounts", s.diskMountHistory)
+			r.Get("/hosts/{id}/metrics/diskio", s.diskIOHistory)
+			r.Get("/hosts/{id}/metrics", s.metricsRange)
+			r.Get("/hosts/{id}/containers", s.listContainers)
+			r.Post("/hosts/{id}/containers", s.containerCreate)
+			// Specific container sub-routes must be registered before the
+			// parameterized /{action} route so chi prefers them on exact match.
+			r.Get("/hosts/{id}/containers/{cid}/inspect", s.containerInspect)
+			r.Get("/hosts/{id}/containers/{cid}/logs", s.containerLogs)
+			r.Get("/hosts/{id}/containers/{cid}/terminal", s.containerTerminal)
+			r.Put("/hosts/{id}/containers/{cid}/resources", s.containerUpdateResources)
+			r.Post("/hosts/{id}/containers/{cid}/recreate", s.containerRecreate)
+			r.Post("/hosts/{id}/containers/{cid}/{action}", s.containerAction)
+			r.Delete("/hosts/{id}/containers/{cid}", s.containerRemove)
+
+			// Network management.
+			r.Get("/hosts/{id}/networks", s.listNetworks)
+			r.Post("/hosts/{id}/networks", s.createNetwork)
+			r.Get("/hosts/{id}/networks/{net_id}", s.inspectNetwork)
+			r.Delete("/hosts/{id}/networks/{net_id}", s.removeNetwork)
+			r.Post("/hosts/{id}/networks/{net_id}/connect", s.connectNetwork)
+			r.Post("/hosts/{id}/networks/{net_id}/disconnect", s.disconnectNetwork)
+
+			// Volume management.
+			r.Get("/hosts/{id}/volumes", s.listVolumes)
+			r.Post("/hosts/{id}/volumes", s.createVolume)
+			r.Get("/hosts/{id}/volumes/{name}", s.inspectVolume)
+			r.Delete("/hosts/{id}/volumes/{name}", s.removeVolume)
+
+			// Images.
+			r.Get("/hosts/{id}/images", s.listImages)
+			r.Get("/hosts/{id}/images/{img}", s.inspectImage)
+			r.Delete("/hosts/{id}/images/{img}", s.removeImage)
+			r.Post("/hosts/{id}/images/pull", s.pullImage)
+			r.Get("/hosts/{id}/images/{img}/update-check", s.checkImageUpdate)
+
+			// Compose stack management. Specific sub-routes registered before /{action}.
+			r.Get("/hosts/{id}/compose", s.listCompose)
+			r.Post("/hosts/{id}/compose", s.createCompose)
+			r.Get("/hosts/{id}/compose/{project}/file", s.composeReadFile)
+			r.Put("/hosts/{id}/compose/{project}/file", s.composeWriteFile)
+			r.Get("/hosts/{id}/compose/{project}/versions", s.composeVersions)
+			r.Get("/hosts/{id}/compose/versions/{vid}", s.composeVersionContent)
+			r.Get("/hosts/{id}/compose/{project}/logs", s.composeLogs)
+			r.Get("/hosts/{id}/compose/{project}", s.getCompose)
+			r.Post("/hosts/{id}/compose/{project}/{action}", s.composeAction)
+			r.Delete("/hosts/{id}/compose/{project}", s.deleteCompose)
+
+			// Agent token management (not the WS endpoint itself).
+			r.Get("/agents/tokens", s.listAgentTokens)
+			r.Post("/agents/tokens", s.createAgentToken)
+			r.Delete("/agents/tokens/{id}", s.revokeAgentToken)
+			r.Get("/agents/connected", s.connectedAgents)
+
+			r.Get("/alerts/metadata", s.alertsMetadata)
+			r.Get("/alerts/rules", s.listAlertRules)
+			r.Post("/alerts/rules", s.createAlertRule)
+			r.Get("/alerts/rules/{id}", s.getAlertRule)
+			r.Put("/alerts/rules/{id}", s.updateAlertRule)
+			r.Delete("/alerts/rules/{id}", s.deleteAlertRule)
+			r.Get("/alerts/events", s.listAlertEvents)
+			r.Get("/alerts/channels", s.listAlertChannels)
+			r.Post("/alerts/channels", s.createAlertChannel)
+			r.Get("/alerts/channels/{id}", s.getAlertChannel)
+			r.Put("/alerts/channels/{id}", s.updateAlertChannel)
+			r.Delete("/alerts/channels/{id}", s.deleteAlertChannel)
+			r.Post("/alerts/channels/{id}/test", s.testAlertChannel)
+		})
 	})
 
 	if webFS != nil {
@@ -1350,26 +1364,6 @@ func parseDuration(s string, def time.Duration) time.Duration {
 		return d
 	}
 	return def
-}
-
-// corsForDev relaxes CORS so the SvelteKit dev server (default :5173) can
-// hit /api directly during development. In production the SPA is served
-// from the same origin and this becomes a no-op for same-origin requests.
-func corsForDev(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" && (strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1")) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		}
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // ── compose handlers ─────────────────────────────────────────────────────────

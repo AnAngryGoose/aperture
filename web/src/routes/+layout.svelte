@@ -2,6 +2,7 @@
 	import 'uplot/dist/uPlot.min.css';
 	import '$lib/styles.css';
 	import { onMount, onDestroy } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
 	import type { SystemInfo } from '$lib/types';
@@ -12,9 +13,25 @@
 	let firing = $state(0);
 	let sys = $state<SystemInfo | null>(null);
 	let now = $state(Date.now());
+	let authReady = $state(false);
 	let alertTimer: ReturnType<typeof setInterval> | null = null;
 	let sysTimer: ReturnType<typeof setInterval> | null = null;
 	let clockTimer: ReturnType<typeof setInterval> | null = null;
+
+	const AUTH_PAGES = ['/login', '/setup'];
+	$: isAuthPage = AUTH_PAGES.includes(page.url.pathname);
+
+	async function checkAuth() {
+		if (isAuthPage) { authReady = true; return; }
+		try {
+			const status = await api.auth.status();
+			if (!status.configured) { await goto('/setup'); return; }
+			if (!status.authenticated) { await goto('/login'); return; }
+		} catch {
+			// hub unreachable — allow through, individual pages will show errors
+		}
+		authReady = true;
+	}
 
 	async function refreshFiring() {
 		try {
@@ -38,10 +55,13 @@
 	);
 
 	onMount(() => {
-		refreshFiring();
-		refreshSystem();
-		alertTimer = setInterval(refreshFiring, 5000);
-		sysTimer   = setInterval(refreshSystem, 30000);
+		checkAuth();
+		if (!isAuthPage) {
+			refreshFiring();
+			refreshSystem();
+			alertTimer = setInterval(refreshFiring, 5000);
+			sysTimer   = setInterval(refreshSystem, 30000);
+		}
 		clockTimer = setInterval(() => (now = Date.now()), 1000);
 	});
 	onDestroy(() => {
@@ -51,6 +71,7 @@
 	});
 </script>
 
+{#if !isAuthPage}
 <header>
 	<div class="brand">
 		<span class="dot"></span>
@@ -67,11 +88,15 @@
 		<a href="/settings" class:active={page.url.pathname.startsWith('/settings')}>Settings</a>
 	</nav>
 </header>
+{/if}
 
-<main>
-	{@render children()}
+<main class:auth-page={isAuthPage}>
+	{#if authReady}
+		{@render children()}
+	{/if}
 </main>
 
+{#if !isAuthPage}
 <footer>
 	{#if sys}
 		<span class="mono">v{sys.version}</span>
@@ -85,6 +110,7 @@
 </footer>
 
 <Toast />
+{/if}
 
 <style>
 	header {
@@ -136,6 +162,14 @@
 		padding: 24px;
 		max-width: 1400px;
 		margin: 0 auto;
+	}
+	main.auth-page {
+		max-width: 100%;
+		padding: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 100vh;
 	}
 	footer {
 		margin-top: 24px;

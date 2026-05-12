@@ -32,8 +32,18 @@ const DEFAULT_DEV_BASE = 'http://localhost:8080';
 const API_BASE = import.meta.env.VITE_API_BASE
 	?? (import.meta.env.DEV ? DEFAULT_DEV_BASE : '');
 
+// Auth-free paths — 401 on these should not trigger a redirect loop.
+const AUTH_FREE = ['/login', '/setup'];
+
+function handleUnauthorized() {
+	if (typeof window !== 'undefined' && !AUTH_FREE.includes(window.location.pathname)) {
+		window.location.href = '/login';
+	}
+}
+
 async function get<T>(path: string): Promise<T> {
 	const res = await fetch(`${API_BASE}${path}`);
+	if (res.status === 401) { handleUnauthorized(); throw new Error('unauthorized'); }
 	if (!res.ok) {
 		const text = await res.text().catch(() => '');
 		throw new Error(`GET ${path} -> ${res.status}: ${text}`);
@@ -43,6 +53,7 @@ async function get<T>(path: string): Promise<T> {
 
 async function post(path: string): Promise<void> {
 	const res = await fetch(`${API_BASE}${path}`, { method: 'POST' });
+	if (res.status === 401) { handleUnauthorized(); throw new Error('unauthorized'); }
 	if (!res.ok) {
 		const text = await res.text().catch(() => '');
 		throw new Error(`POST ${path} -> ${res.status}: ${text}`);
@@ -51,6 +62,7 @@ async function post(path: string): Promise<void> {
 
 async function del(path: string): Promise<void> {
 	const res = await fetch(`${API_BASE}${path}`, { method: 'DELETE' });
+	if (res.status === 401) { handleUnauthorized(); throw new Error('unauthorized'); }
 	if (!res.ok) {
 		const text = await res.text().catch(() => '');
 		throw new Error(`DELETE ${path} -> ${res.status}: ${text}`);
@@ -63,6 +75,7 @@ async function send<T>(path: string, method: 'POST' | 'PUT', body: unknown): Pro
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body)
 	});
+	if (res.status === 401) { handleUnauthorized(); throw new Error('unauthorized'); }
 	if (!res.ok) {
 		const text = await res.text().catch(() => '');
 		throw new Error(`${method} ${path} -> ${res.status}: ${text}`);
@@ -71,6 +84,20 @@ async function send<T>(path: string, method: 'POST' | 'PUT', body: unknown): Pro
 }
 
 export const api = {
+	// Auth
+	auth: {
+		status: () =>
+			fetch(`${API_BASE}/api/auth/status`)
+				.then((r) => r.json() as Promise<{ configured: boolean; authenticated: boolean }>),
+		setup: (password: string) =>
+			send<{ ok: boolean }>('/api/auth/setup', 'POST', { password }),
+		login: (password: string) =>
+			send<{ ok: boolean }>('/api/auth/login', 'POST', { password }),
+		logout: () => send<{ ok: boolean }>('/api/auth/logout', 'POST', {}),
+		changePassword: (current: string, newPw: string) =>
+			send<{ ok: boolean }>('/api/auth/password', 'POST', { current, new: newPw })
+	},
+
 	systemInfo: () => get<SystemInfo>('/api/system/info'),
 	hosts: () => get<Host[]>('/api/hosts'),
 	host: (id: string) => get<Host>(`/api/hosts/${id}`),

@@ -1,9 +1,39 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { api } from '$lib/api';
 	import type { AgentToken } from '$lib/types';
 	import { toast } from '$lib/toast';
 	import { absTime, relTime } from '$lib/format';
+
+	// ── password change ───────────────────────────────────────────────────────
+	let pwCurrent  = $state('');
+	let pwNew      = $state('');
+	let pwConfirm  = $state('');
+	let pwError    = $state('');
+	let pwSaving   = $state(false);
+	let pwMismatch = $derived(pwConfirm.length > 0 && pwNew !== pwConfirm);
+	let pwCanSave  = $derived(pwCurrent.length > 0 && pwNew.length >= 8 && pwNew === pwConfirm && !pwSaving);
+
+	async function changePassword(e: SubmitEvent) {
+		e.preventDefault();
+		if (!pwCanSave) return;
+		pwSaving = true; pwError = '';
+		try {
+			await api.auth.changePassword(pwCurrent, pwNew);
+			toast.success('Password updated');
+			pwCurrent = pwNew = pwConfirm = '';
+		} catch (err) {
+			pwError = (err instanceof Error) ? err.message : 'Failed to update password';
+		} finally {
+			pwSaving = false;
+		}
+	}
+
+	async function logout() {
+		await api.auth.logout().catch(() => {});
+		await goto('/login');
+	}
 
 	let tokens = $state<AgentToken[]>([]);
 	let loading = $state(true);
@@ -241,6 +271,38 @@
 	</div>
 {/if}
 
+<!-- ── Security ──────────────────────────────────────────────────────────── -->
+<div class="section-header" style="margin-top:32px">
+	<div>
+		<div class="section-title">Security</div>
+		<div class="section-sub muted">Manage admin password and session.</div>
+	</div>
+</div>
+
+<div class="security-card">
+	<form onsubmit={changePassword}>
+		<div class="pw-row">
+			<label for="pw-current">Current password</label>
+			<input id="pw-current" type="password" bind:value={pwCurrent} disabled={pwSaving} autocomplete="current-password" />
+		</div>
+		<div class="pw-row" style="margin-top:12px">
+			<label for="pw-new">New password <span style="font-weight:400;text-transform:none">(min 8 chars)</span></label>
+			<input id="pw-new" type="password" bind:value={pwNew} disabled={pwSaving} autocomplete="new-password" />
+		</div>
+		<div class="pw-row" style="margin-top:12px">
+			<label for="pw-confirm">Confirm new password</label>
+			<input id="pw-confirm" type="password" bind:value={pwConfirm} disabled={pwSaving}
+				class:bad={pwMismatch} autocomplete="new-password" />
+			{#if pwMismatch}<p class="pw-hint">Passwords do not match.</p>{/if}
+		</div>
+		{#if pwError}<p class="pw-hint" style="margin-top:6px">{pwError}</p>{/if}
+		<div class="pw-actions" style="margin-top:16px">
+			<button type="submit" disabled={!pwCanSave}>{pwSaving ? 'Saving…' : 'Change password'}</button>
+			<button type="button" class="btn-logout" onclick={logout}>Sign out</button>
+		</div>
+	</form>
+</div>
+
 <style>
 	.page-header { margin-bottom: 20px; }
 	h1 { margin: 0; font-size: 20px; font-weight: 600; }
@@ -376,4 +438,48 @@
 		line-height: 1.5;
 	}
 	.warn-icon { flex-shrink: 0; }
+
+	/* security section */
+	.security-card {
+		background: var(--bg-elev);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 20px 24px;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		max-width: 480px;
+	}
+	.pw-row {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.pw-row label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+	.pw-row input {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--text);
+		font-size: 14px;
+		padding: 8px 12px;
+		width: 100%;
+		box-sizing: border-box;
+		outline: none;
+		transition: border-color 0.15s;
+	}
+	.pw-row input:focus { border-color: var(--accent); }
+	.pw-row input.bad   { border-color: var(--bad); }
+	.pw-hint { font-size: 12px; color: var(--bad); }
+	.pw-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+	.btn-logout {
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--text-dim);
+		font-size: 13px;
+		padding: 7px 14px;
+		cursor: pointer;
+	}
+	.btn-logout:hover { border-color: var(--bad); color: var(--bad); }
 </style>
