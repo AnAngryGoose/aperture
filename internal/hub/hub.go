@@ -80,6 +80,17 @@ type TerminalProvider interface {
 	CloseTerminal(ctx context.Context, reqID string) error
 }
 
+// SSEEvent is the payload pushed to SSE subscribers on each metric sample.
+type SSEEvent struct {
+	HostID string  `json:"hostId"`
+	CPU    float64 `json:"cpu"`
+	Mem    float64 `json:"mem"`
+	NetIn  uint64  `json:"netIn"`
+	NetOut uint64  `json:"netOut"`
+	Temp   float64 `json:"temp"`
+	Ts     int64   `json:"ts"`
+}
+
 type Hub struct {
 	store    *store.Store
 	log      *slog.Logger
@@ -97,6 +108,9 @@ type Hub struct {
 	// evaluator is set by SetEvaluator before Run is called. The interface
 	// type avoids an import cycle with internal/alerts.
 	evaluator Evaluator
+	// sseMu guards sseSubscribers.
+	sseMu          sync.Mutex
+	sseSubscribers map[string]chan SSEEvent // subscriber-id -> channel
 }
 
 // Evaluator is the seam used by the hub to dispatch every persisted sample
@@ -117,15 +131,44 @@ func New(cfg Config) *Hub {
 		cfg.Logger = slog.Default()
 	}
 	return &Hub{
-		store:      cfg.Store,
-		log:        cfg.Logger,
-		retain:     cfg.Retain,
-		dockers:    make(map[string]DockerProvider),
-		composes:   make(map[string]ComposeProvider),
-		terminals:  make(map[string]TerminalProvider),
-		hosts:      make(map[string]types.Host),
-		samples:    make(chan types.MetricSample, 256),
-		latestRich: make(map[string]types.MetricSample),
+		store:          cfg.Store,
+		log:            cfg.Logger,
+		retain:         cfg.Retain,
+		dockers:        make(map[string]DockerProvider),
+		composes:       make(map[string]ComposeProvider),
+		terminals:      make(map[string]TerminalProvider),
+		hosts:          make(map[string]types.Host),
+		samples:        make(chan types.MetricSample, 256),
+		latestRich:     make(map[string]types.MetricSample),
+		sseSubscribers: make(map[string]chan SSEEvent),
+	}
+}
+
+// SubscribeSSE registers a channel to receive live metric events. Returns
+// an unsubscribe function that must be called when the subscriber disconnects.
+func (h *Hub) SubscribeSSE() (string, <-chan SSEEvent, func()) {
+	id := fmt.Sprintf("sse-%d", time.Now().UnixNano())
+	ch := make(chan SSEEvent, 64)
+	h.sseMu.Lock()
+	h.sseSubscribers[id] = ch
+	h.sseMu.Unlock()
+	unsub := func() {
+		h.sseMu.Lock()
+		delete(h.sseSubscribers, id)
+		h.sseMu.Unlock()
+		close(ch)
+	}
+	return id, ch, unsub
+}
+
+func (h *Hub) broadcastSSE(ev SSEEvent) {
+	h.sseMu.Lock()
+	defer h.sseMu.Unlock()
+	for _, ch := range h.sseSubscribers {
+		select {
+		case ch <- ev:
+		default: // subscriber is slow; drop rather than block ingest
+		}
 	}
 }
 
@@ -184,6 +227,23 @@ func (h *Hub) ingestLoop(ctx context.Context) {
 			if h.evaluator != nil {
 				h.evaluator.Evaluate(ctx, s)
 			}
+			// Broadcast lightweight SSE event to all connected browser clients.
+			var avgTemp float64
+			if len(s.Temps) > 0 {
+				for _, t := range s.Temps {
+					avgTemp += t.Temp
+				}
+				avgTemp /= float64(len(s.Temps))
+			}
+			h.broadcastSSE(SSEEvent{
+				HostID: s.HostID,
+				CPU:    s.CPUPercent,
+				Mem:    s.MemPercent,
+				NetIn:  s.NetRxBytes,
+				NetOut: s.NetTxBytes,
+				Temp:   avgTemp,
+				Ts:     s.Timestamp.Unix(),
+			})
 		}
 	}
 }
@@ -260,11 +320,18 @@ func (h *Hub) samplesIn(hostID string) chan<- types.MetricSample {
 	return out
 }
 
-// RegisterDocker attaches a docker provider for a host.
+// RegisterDocker attaches a docker provider for a host and marks the host kind as "docker".
 func (h *Hub) RegisterDocker(hostID string, p DockerProvider) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.dockers[hostID] = p
+	// Best-effort: update kind so the UI can show the docker chip.
+	go func() {
+		ctx := context.Background()
+		if err := h.store.UpdateHostKind(ctx, hostID, "docker"); err != nil {
+			h.log.Warn("update host kind", "host_id", hostID, "err", err)
+		}
+	}()
 }
 
 func (h *Hub) Docker(hostID string) (DockerProvider, bool) {

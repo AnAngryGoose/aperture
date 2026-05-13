@@ -99,7 +99,23 @@ export const api = {
 	},
 
 	systemInfo: () => get<SystemInfo>('/api/system/info'),
-	hosts: () => get<Host[]>('/api/hosts'),
+
+	// Hosts — both the old flat API and a namespaced version for new code.
+	hosts: {
+		list: () => get<Host[]>('/api/hosts'),
+		get: (id: string) => get<Host>(`/api/hosts/${id}`),
+		updateTags: (id: string, tags: string[]) =>
+			send<{ tags: string[] }>(`/api/hosts/${id}/tags`, 'PUT', tags)
+	},
+
+	// Settings / user preferences.
+	settings: {
+		getDashboardLayout: () => get<Record<string, unknown>>('/api/settings/dashboard-layout'),
+		saveDashboardLayout: (layout: unknown) =>
+			send<{ ok: boolean }>('/api/settings/dashboard-layout', 'PUT', layout)
+	},
+
+	// Legacy flat accessors kept for existing pages.
 	host: (id: string) => get<Host>(`/api/hosts/${id}`),
 	latest: (id: string) => get<MetricSample | null>(`/api/hosts/${id}/metrics/latest`),
 	metrics: (id: string, range = '1h', points = 300) =>

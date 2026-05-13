@@ -154,6 +154,16 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 			r.Put("/alerts/channels/{id}", s.updateAlertChannel)
 			r.Delete("/alerts/channels/{id}", s.deleteAlertChannel)
 			r.Post("/alerts/channels/{id}/test", s.testAlertChannel)
+
+			// Host tag management.
+			r.Put("/hosts/{id}/tags", s.updateHostTags)
+
+			// User preference / dashboard layout persistence.
+			r.Get("/settings/dashboard-layout", s.getDashboardLayout)
+			r.Put("/settings/dashboard-layout", s.setDashboardLayout)
+
+			// SSE live metrics stream.
+			r.Get("/stream/metrics", s.streamMetrics)
 		})
 	})
 
@@ -221,6 +231,15 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Annotate each host with its open alert count.
+	events, _ := s.hub.Store().ListAlertEvents(r.Context(), store.AlertEventFilter{OpenOnly: true, Limit: 1000})
+	alertCounts := make(map[string]int)
+	for _, ev := range events {
+		alertCounts[ev.HostID]++
+	}
+	for i := range hosts {
+		hosts[i].OpenAlerts = alertCounts[hosts[i].ID]
+	}
 	writeJSON(w, http.StatusOK, hosts)
 }
 
@@ -236,6 +255,81 @@ func (s *Server) getHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, host)
+}
+
+func (s *Server) updateHostTags(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var tags []string
+	if err := json.NewDecoder(r.Body).Decode(&tags); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.hub.Store().UpdateHostTags(r.Context(), id, tags); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
+func (s *Server) getDashboardLayout(w http.ResponseWriter, r *http.Request) {
+	val, err := s.hub.Store().UserSetting(r.Context(), "dashboard_layout")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if val == "" {
+		val = "{}"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(val))
+}
+
+func (s *Server) setDashboardLayout(w http.ResponseWriter, r *http.Request) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.hub.Store().SetUserSetting(r.Context(), "dashboard_layout", string(raw)); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// streamMetrics streams live metric samples as Server-Sent Events. Each event
+// is a JSON SSEEvent with fields: hostId, cpu, mem, netIn, netOut, temp, ts.
+func (s *Server) streamMetrics(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, errors.New("streaming not supported"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	_, ch, unsub := s.hub.SubscribeSSE()
+	defer unsub()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, open := <-ch:
+			if !open {
+				return
+			}
+			data, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }
 
 // latestMetric returns the most recent sample for a host. It prefers the

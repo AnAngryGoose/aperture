@@ -34,6 +34,14 @@ type Host struct {
 	// hub process collects them in-process. Future values: "agent" (remote push).
 	Source       string `json:"source"`
 	AgentVersion string `json:"agent_version,omitempty"`
+	// Kind is derived from capabilities: "docker" if docker is available,
+	// "edge" if the host is a remote agent without docker, "linux" otherwise.
+	Kind string `json:"kind"`
+	// Tags are user-assigned labels for filtering on the dashboard.
+	Tags []string `json:"tags"`
+	// OpenAlerts is the count of currently-firing alert events for this host.
+	// Computed at query time, not stored.
+	OpenAlerts int `json:"open_alerts"`
 }
 
 // --- Rich metric sub-types ---

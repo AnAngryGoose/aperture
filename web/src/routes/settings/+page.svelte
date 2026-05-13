@@ -5,6 +5,8 @@
 	import type { AgentToken } from '$lib/types';
 	import { toast } from '$lib/toast';
 	import { absTime, relTime } from '$lib/format';
+	import { theme } from '$lib/stores/theme';
+	import { accent, ACCENTS, type AccentKey } from '$lib/stores/accent';
 
 	// ── password change ───────────────────────────────────────────────────────
 	let pwCurrent  = $state('');
@@ -129,6 +131,45 @@
 
 <div class="page-header">
 	<h1>Settings</h1>
+</div>
+
+<!-- ── Appearance ────────────────────────────────────────────────────────── -->
+<div class="section-header">
+	<div>
+		<div class="section-title">Appearance</div>
+		<div class="section-sub muted">Theme and accent color. Changes apply immediately.</div>
+	</div>
+</div>
+
+<div class="appear-card">
+	<div class="appear-row">
+		<span class="appear-label">Theme</span>
+		<div class="theme-btns">
+			{#each (['dark', 'light', 'system'] as const) as t}
+				<button
+					class="theme-btn"
+					class:active={theme.mode === t}
+					onclick={() => theme.set(t)}
+				>{t.charAt(0).toUpperCase() + t.slice(1)}</button>
+			{/each}
+		</div>
+	</div>
+
+	<div class="appear-row">
+		<span class="appear-label">Accent</span>
+		<div class="accent-swatches">
+			{#each Object.entries(ACCENTS) as [key, val]}
+				<button
+					class="swatch"
+					class:active={accent.key === key}
+					style="--sw: {val.hex}"
+					title={val.label}
+					onclick={() => accent.set(key as AccentKey)}
+					aria-label={val.label}
+				></button>
+			{/each}
+		</div>
+	</div>
 </div>
 
 <!-- ── Agent tokens ───────────────────────────────────────────────────────── -->
@@ -482,4 +523,70 @@
 		cursor: pointer;
 	}
 	.btn-logout:hover { border-color: var(--bad); color: var(--bad); }
+
+	/* Appearance */
+	.appear-card {
+		background: var(--bg-elev);
+		border: 1px solid var(--line);
+		border-radius: var(--r-lg);
+		padding: 16px 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		max-width: 480px;
+		margin-bottom: 28px;
+	}
+
+	.appear-row {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+	}
+
+	.appear-label {
+		font-size: 12px;
+		color: var(--text-dim);
+		width: 56px;
+		flex-shrink: 0;
+	}
+
+	.theme-btns {
+		display: flex;
+		gap: 4px;
+	}
+
+	.theme-btn {
+		padding: 5px 14px;
+		font-size: 12px;
+		font-family: var(--font-sans);
+		color: var(--text-dim);
+		background: var(--bg-elev-2);
+		border: 1px solid var(--line);
+		border-radius: var(--r-pill);
+		cursor: pointer;
+		transition: background 120ms, color 120ms, border-color 120ms;
+	}
+
+	.theme-btn:hover { background: var(--bg-hover); color: var(--text); }
+	.theme-btn.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+
+	.accent-swatches {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+	}
+
+	.swatch {
+		width: 22px;
+		height: 22px;
+		border-radius: 50%;
+		background: var(--sw);
+		border: 2px solid transparent;
+		cursor: pointer;
+		transition: transform 120ms, border-color 120ms;
+		padding: 0;
+	}
+
+	.swatch:hover { transform: scale(1.15); }
+	.swatch.active { border-color: var(--text); }
 </style>

@@ -152,3 +152,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TIMESTAMP NOT NULL
 );
 
+-- User settings: arbitrary key-value pairs for user preferences (dashboard
+-- layout, appearance, etc.). A single-user app so no user_id column needed.
+CREATE TABLE IF NOT EXISTS user_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+

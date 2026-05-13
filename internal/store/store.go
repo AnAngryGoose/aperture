@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -40,6 +41,8 @@ func Open(path string) (*Store, error) {
 	migrations := []string{
 		`ALTER TABLE alert_rules ADD COLUMN severity TEXT NOT NULL DEFAULT 'warning'`,
 		`ALTER TABLE hosts ADD COLUMN agent_version TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE hosts ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE hosts ADD COLUMN kind TEXT NOT NULL DEFAULT 'linux'`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
@@ -81,9 +84,28 @@ func (s *Store) TouchHost(ctx context.Context, hostID string, t time.Time) error
 	return err
 }
 
+func scanHost(scan func(...any) error) (types.Host, error) {
+	var h types.Host
+	var tagsJSON string
+	err := scan(&h.ID, &h.Name, &h.OS, &h.Platform, &h.Kernel, &h.Arch,
+		&h.CPUModel, &h.CPUCount, &h.MemTotal, &h.Source, &h.AgentVersion,
+		&h.Kind, &tagsJSON, &h.CreatedAt, &h.LastSeen)
+	if err != nil {
+		return h, err
+	}
+	if tagsJSON != "" && tagsJSON != "[]" {
+		_ = json.Unmarshal([]byte(tagsJSON), &h.Tags)
+	}
+	if h.Tags == nil {
+		h.Tags = []string{}
+	}
+	return h, nil
+}
+
 func (s *Store) ListHosts(ctx context.Context) ([]types.Host, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, agent_version, created_at, last_seen
+		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source,
+		       agent_version, kind, tags, created_at, last_seen
 		FROM hosts ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -91,9 +113,8 @@ func (s *Store) ListHosts(ctx context.Context) ([]types.Host, error) {
 	defer rows.Close()
 	var out []types.Host
 	for rows.Next() {
-		var h types.Host
-		if err := rows.Scan(&h.ID, &h.Name, &h.OS, &h.Platform, &h.Kernel, &h.Arch,
-			&h.CPUModel, &h.CPUCount, &h.MemTotal, &h.Source, &h.AgentVersion, &h.CreatedAt, &h.LastSeen); err != nil {
+		h, err := scanHost(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, h)
@@ -102,12 +123,11 @@ func (s *Store) ListHosts(ctx context.Context) ([]types.Host, error) {
 }
 
 func (s *Store) GetHost(ctx context.Context, id string) (*types.Host, error) {
-	var h types.Host
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source, agent_version, created_at, last_seen
-		FROM hosts WHERE id = ?`, id).Scan(
-		&h.ID, &h.Name, &h.OS, &h.Platform, &h.Kernel, &h.Arch,
-		&h.CPUModel, &h.CPUCount, &h.MemTotal, &h.Source, &h.AgentVersion, &h.CreatedAt, &h.LastSeen)
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, os, platform, kernel, arch, cpu_model, cpu_count, mem_total, source,
+		       agent_version, kind, tags, created_at, last_seen
+		FROM hosts WHERE id = ?`, id)
+	h, err := scanHost(row.Scan)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -115,6 +135,40 @@ func (s *Store) GetHost(ctx context.Context, id string) (*types.Host, error) {
 		return nil, err
 	}
 	return &h, nil
+}
+
+// UpdateHostTags persists a JSON-encoded tag array for a host.
+func (s *Store) UpdateHostTags(ctx context.Context, hostID string, tags []string) error {
+	b, err := json.Marshal(tags)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE hosts SET tags = ? WHERE id = ?`, string(b), hostID)
+	return err
+}
+
+// UpdateHostKind sets the kind (docker|linux|edge) for a host.
+func (s *Store) UpdateHostKind(ctx context.Context, hostID, kind string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE hosts SET kind = ? WHERE id = ?`, kind, hostID)
+	return err
+}
+
+// UserSetting returns the stored value for a settings key, or "" if unset.
+func (s *Store) UserSetting(ctx context.Context, key string) (string, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM user_settings WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetUserSetting upserts a key-value user preference.
+func (s *Store) SetUserSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO user_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value)
+	return err
 }
 
 func (s *Store) InsertMetric(ctx context.Context, m types.MetricSample) error {

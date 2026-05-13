@@ -16,6 +16,9 @@ export interface Host {
 	last_seen: string;
 	source: string;       // "local" | "agent"
 	agent_version?: string;
+	kind: string;         // "docker" | "linux" | "edge"
+	tags: string[];
+	open_alerts: number;
 }
 
 export interface AgentToken {

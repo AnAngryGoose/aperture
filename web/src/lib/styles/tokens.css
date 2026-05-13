@@ -1,0 +1,74 @@
+/* Aperture design tokens — toggle theme via <html data-theme="dark|light"> */
+
+@import '@fontsource/geist/400.css';
+@import '@fontsource/geist/500.css';
+@import '@fontsource/geist/600.css';
+@import '@fontsource/geist-mono/400.css';
+@import '@fontsource/geist-mono/500.css';
+
+:root,
+[data-theme="dark"] {
+  --bg: #0d0f12;
+  --bg-elev: #14171c;
+  --bg-elev-2: #191d23;
+  --bg-hover: #1c2128;
+  --line: #242932;
+  --line-strong: #2e343d;
+  --text: #e6e8ec;
+  --text-dim: #9aa0a9;
+  --text-faint: #6a7079;
+}
+
+[data-theme="light"] {
+  --bg: #f6f5f1;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #fbfaf6;
+  --bg-hover: #f0eee8;
+  --line: #e6e3db;
+  --line-strong: #d4d0c4;
+  --text: #1a1c20;
+  --text-dim: #5b6068;
+  --text-faint: #8a8f97;
+}
+
+/* Accent — default teal; overridden by accent store */
+:root {
+  --accent: #14b8a6;
+  --accent-soft: rgba(20, 184, 166, 0.14);
+  --accent-line: rgba(20, 184, 166, 0.4);
+}
+
+/* Status — theme-invariant */
+:root {
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.14);
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.14);
+  --crit: #ef4444;
+  --crit-soft: rgba(239, 68, 68, 0.14);
+  --info: #60a5fa;
+  --offline: #6b7280;
+}
+
+/* Typography */
+:root {
+  --font-sans: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'Cascadia Code', monospace;
+}
+
+/* Radius */
+:root {
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-lg: 6px;
+  --r-pill: 999px;
+}
+
+/* Motion */
+:root {
+  --ease-card: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --dur-card: 180ms;
+  --dur-slide: 260ms;
+  --dur-modal: 220ms;
+  --dur-menu: 140ms;
+}

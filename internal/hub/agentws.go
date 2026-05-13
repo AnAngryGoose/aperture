@@ -250,7 +250,10 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ah.mu.Unlock()
 
 	// 6. Optionally register docker + compose + terminal providers.
+	// Update host kind based on agent capabilities.
+	kind := "edge"
 	if hello.HasDocker {
+		kind = "docker"
 		ah.hub.RegisterDocker(hostID, &agentDockerProvider{handler: ah, hostID: hostID})
 		ah.hub.RegisterTerminal(hostID, &agentTerminalProvider{handler: ah, hostID: hostID})
 		ah.log.Info("docker provider active", "host_id", hostID)
@@ -258,6 +261,9 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hello.HasCompose {
 		ah.hub.RegisterCompose(hostID, &agentComposeProvider{handler: ah, hostID: hostID})
 		ah.log.Info("compose provider active", "host_id", hostID)
+	}
+	if err := ah.hub.Store().UpdateHostKind(r.Context(), hostID, kind); err != nil {
+		ah.log.Warn("update host kind", "host_id", hostID, "err", err)
 	}
 
 	// 7. Send ack.

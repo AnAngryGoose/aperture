@@ -29,3 +29,5 @@ aperture.db-wal
 .env.local
 
 # Note: /opt/aperture-roadmap.docx lives outside this repo and is intentionally not vendored.
+ISSUES.md
+.gitignore

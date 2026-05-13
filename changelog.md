@@ -549,6 +549,100 @@ Wave 1 — Correctness pass. Fixes silent alert failures, terminal double-encodi
 
 ---
 
+## [0.4.0-alpha.1] — 2026-05-12
+
+Full UI redesign. Replaces the single-column top-nav SPA with a sidebar shell, new design token system, three-variant host dashboard cards, live-streaming sparklines, host drill-in slide-over panel, and Settings → Appearance.
+
+### Added — Design system
+
+- **`web/src/lib/styles/tokens.css`** (new) — Complete CSS variable system. Dark and light themes toggled via `[data-theme="dark|light"]` on `<html>`. Accent variants: teal (default), indigo, amber, violet, lime, rose — each with a hex, soft background, and line variant. Status colors (`--ok`, `--warn`, `--crit`, `--info`, `--offline`) are theme-invariant. Geist Sans + Geist Mono imported via `@fontsource/geist` / `@fontsource/geist-mono`. Motion tokens: `--ease-card: cubic-bezier(.2,.7,.3,1)`, `--dur-slide: 260ms`, all inside `@media (prefers-reduced-motion: no-preference)`.
+- **`web/src/lib/styles/global.css`** (new) — Base resets, typography scale, mono utility, table/input/button defaults, `.card`, `.pill` (ok/warn/crit/offline variants), `.segmented` control, `.glass-topbar` / `.glass-drillin` surfaces, shimmer skeleton, `.pulse-crit` animation, legacy compat aliases (`--border → --line`, `--bad → --crit`, `--bg-elev-1 → --bg-elev`, `--mono → --font-mono`).
+- **`web/src/app.html`** — `data-theme="dark"` added to `<html>` for SSR-safe initial paint.
+- **`web/node_modules`** — `@fontsource/geist`, `@fontsource/geist-mono`, `lucide-svelte` added.
+
+### Added — Stores
+
+- **`web/src/lib/stores/theme.ts`** — `ThemeMode` store (`dark|light|system`). Reads/writes `localStorage`. Applies `document.documentElement.dataset.theme`. Watches `prefers-color-scheme` media query when mode is `system`.
+- **`web/src/lib/stores/accent.ts`** — `AccentKey` store with six options. Applies `--accent`, `--accent-soft`, `--accent-line` to `:root` on change and on init.
+- **`web/src/lib/stores/hosts.ts`** — `HostEntry` map with 60-sample ring buffer per host (`cpuSeries`, `memSeries`, `netInSeries`, `netOutSeries`, `tsSeries`). `HostStatus` derived from `last_seen` age. SSE subscription to `/api/stream/metrics` updates the ring buffer live.
+- **`web/src/lib/stores/dashboardLayout.ts`** — Card layout (`rich|tile|list`), pinned host set, active tag filter, and card order. Persists to `localStorage` and syncs to `/api/settings/dashboard-layout`.
+
+### Added — Primitives
+
+- `Sparkline.svelte` — lightweight SVG area sparkline, ring-buffer aware, no library dependency.
+- `Meter.svelte` — 4px linear bar with `warn ≥ 75` / `crit ≥ 90` color thresholds.
+- `StatusIndicator.svelte` — color dot with `.pulse-crit` on critical.
+- `Tag.svelte` — host tag chip (11px mono, bg-elev-2).
+- `Kbd.svelte` — keyboard shortcut chip.
+- `Icon.svelte` — `lucide-svelte` wrapper with name-to-component map (40+ icons).
+- `Button.svelte` — primary / ghost / mini / icon / danger variants.
+- `Field.svelte` — label + input slot + error/hint.
+- `Modal.svelte` — glass backdrop, scale-in animation, Esc and backdrop-click to close.
+- `HostKindIcon.svelte` — 28×28 chip with docker/linux/edge icon.
+- `SkeletonCard.svelte`, `EmptyBlock.svelte`, `ErrorBlock.svelte` — loading, empty, and error states.
+
+### Added — Shell
+
+- **`web/src/lib/components/shell/Sidebar.svelte`** — 220px sidebar. WORKSPACE (Dashboard, Hosts, Containers, Stacks, Storage, Network) and OBSERVE (Logs, Shell, Automation, Alerts) sections. Active nav item has 2px left accent rail. Alert badge on Alerts nav item.
+- **`web/src/lib/components/shell/Topbar.svelte`** — Search input with ⌘K hint, sync indicator dot, theme toggle button, avatar initials chip.
+- **`web/src/lib/components/shell/AppShell.svelte`** — CSS grid layout (220px sidebar + 1fr content). Wires theme and accent stores on mount.
+- **`web/src/routes/+layout.svelte`** — Replaced top-nav with `<AppShell>`. Auth pages get centered wrapper; all other pages live inside the shell.
+- **`web/src/routes/+page.svelte`** — Replaced with redirect to `/dashboard`.
+
+### Added — Dashboard
+
+- `PageHeader.svelte` — H1 + status counts strip (Healthy / Warning / Critical / Offline / Containers / Alerts).
+- `FilterBar.svelte` — Tag filter tabs + Rich/Tile/List segmented control + gradient "Add host" button.
+- `RichCard.svelte` — Full-width host card with left status rail, sparklines, side info panel (OS/arch, uptime, container counts), alert footer.
+- `TileCard.svelte` — Compact 2×2 metric grid (CPU / Mem / Net / Temp) with status-colored sparkline.
+- `CompactRow.svelte` — 7-column list row (status, name/kind, OS, CPU%, Mem%, Net↓, tags).
+- `HostCard.svelte` — Variant switcher.
+- `HostGrid.svelte` — Grid container with loading skeleton, empty block, and error block states.
+- `AddWidgetTile.svelte` — Dashed "+" tile, turns accent on hover.
+- `CardMenu.svelte` — Glass popover with pin / shell / restart / remove actions.
+- **`web/src/routes/dashboard/+page.svelte`** — New dashboard page. Parallel host and metrics load. SSE connection. DrillIn + AddHostModal integration.
+
+### Added — Drill-in
+
+- `DrillIn.svelte` — Slide-over panel (260ms ease-card). Sticky header with HostKindIcon, name, StatusIndicator, tags, action buttons (Restart / SSH / Update / Stop). Tab nav: Overview / Containers / Stacks / Logs / Shell. Overview tab: 4-column BigMetric grid + 3-column lower panel (Storage / Containers / Events).
+- `BigMetric.svelte` — 26px mono value + sparkline in an elevated card.
+- `StoragePanel.svelte` — Disk mounts with Meter bars, falls back to root disk.
+- `ContainersPanel.svelte` — Running/Stopped/Unhealthy counts + top-by-CPU list.
+- `EventsPanel.svelte` — Recent alert events feed (last 8).
+
+### Added — Add Host Modal
+
+- `AddHostModal.svelte` — 2-step glass modal (scale-in 220ms). Step 1: method radio + form fields. Step 2: async verify rows with spinner.
+- `MethodRadio.svelte` — Three radio cards: Install Agent / Docker API / SSH Probe. Accent-tinted on selection.
+- `VerifyRow.svelte` — Check row with pending / checking (spinner) / ok / error states.
+
+### Added — Settings → Appearance
+
+- **`web/src/routes/settings/+page.svelte`** — New Appearance section at the top: Theme pill buttons (Dark / Light / System) and Accent color swatches (6 colors). Changes apply immediately via stores.
+
+### Added — Backend (SSE, tags, kind, layout)
+
+- **`internal/types/types.go`** — `Host` gains `Kind string`, `Tags []string`, `OpenAlerts int`.
+- **`internal/store/schema.sql`** — `user_settings` table for key/value preference storage.
+- **`internal/store/store.go`** — `UpdateHostTags`, `UpdateHostKind`, `UserSetting`, `SetUserSetting`. Idempotent migrations for `tags` and `kind` columns in `hosts`. `scanHost` helper centralises all column scanning.
+- **`internal/hub/hub.go`** — `SSEEvent` struct. `sseSubscribers` map. `SubscribeSSE`, `broadcastSSE`. `ingestLoop` broadcasts after each sample.
+- **`internal/hub/agentws.go`** — On agent connect, detects host kind (docker vs edge) and calls `store.UpdateHostKind`.
+- **`internal/api/api.go`** — Routes: `PUT /api/hosts/{id}/tags`, `GET/PUT /api/settings/dashboard-layout`, `GET /api/stream/metrics` (SSE). `listHosts` annotates `open_alerts` count. `streamMetrics` fans out SSE to connected clients.
+- **`web/src/lib/types.ts`** — `Host` gains `kind`, `tags`, `open_alerts`.
+- **`web/src/lib/api.ts`** — `api.hosts.{list,get,updateTags}`, `api.settings.{getDashboardLayout,saveDashboardLayout}`.
+- **`web/src/lib/format.ts`** — Short aliases `fmtBytes`, `fmtRate`, `fmtDuration`, `fmtRelative`, `fmtAbsolute` exported alongside the original names.
+
+### Added — Stub routes
+
+- `/containers`, `/stacks`, `/storage`, `/network`, `/logs`, `/shell`, `/automation` — stub pages with "Coming soon" message so sidebar nav links don't 404.
+
+### Verified
+
+- `npm run build` — clean, no TypeScript errors.
+- `go build ./...` — clean.
+
+---
+
 ## [Unreleased]
 
 Phase 3 continues: Deep Docker surface — Volumes and Images next.

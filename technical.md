@@ -374,10 +374,76 @@ uPlot wrapper. Reasons for choosing uPlot: ~45 KB minified, draws thousands of p
 
 ### Routes
 
+### Design system (`web/src/lib/styles/`)
+
+Two files replace the old `styles.css`:
+
+- **`tokens.css`** — all CSS custom properties. Dark and light themes toggle via `[data-theme="dark|light"]` on `<html>`. Six user-selectable accent colors (teal default, indigo, amber, violet, lime, rose), each with hex/soft/line variants applied to `:root` by the `accent` store. Status colors (`--ok`, `--warn`, `--crit`, `--info`, `--offline`) are theme-invariant — never used for selection. Geist Sans + Geist Mono imported via `@fontsource/*`. Motion tokens (`--ease-card`, `--dur-slide`, `--dur-modal`, etc.) are all inside `@media (prefers-reduced-motion: no-preference)`.
+- **`global.css`** — imports `tokens.css`, then adds base resets, typography scale, utility classes (`.mono`, `.label-mono`, `.text-dim`, etc.), table/input/button global styles, `.card`, `.pill`, `.segmented`, `.glass-topbar`, `.glass-drillin`, `.skeleton` shimmer, `.pulse-crit`. Also exports **legacy aliases** (`--border → --line`, `--bad → --crit`, `--bg-elev-1 → --bg-elev`, `--mono → --font-mono`, `.muted`) so existing pages work without a rewrite.
+
+**Key design rules:**
+- All numbers, addresses, timestamps, sizes, rates: `font-family: var(--font-mono)`.
+- Status colors (`--ok/--warn/--crit`) are health-only. `--accent` is brand/selection/focus only.
+- Card hover: `translateY(-1px)` 180ms `--ease-card`. Drill-in slide: 260ms same easing.
+- Sparkline never re-animates on data update — ring buffer is append+shift, no CSS on the SVG path.
+
+### Shell (`web/src/lib/components/shell/`)
+
+| Component | Role |
+| --- | --- |
+| `AppShell.svelte` | CSS grid: `220px 1fr`. Mounts `Sidebar` left and `Topbar + <slot>` right. Initializes theme and accent stores on mount. |
+| `Sidebar.svelte` | 220px fixed sidebar. WORKSPACE section: Dashboard, Hosts, Containers, Stacks, Storage, Network. OBSERVE section: Logs, Shell, Automation, Alerts. Active item: 2px left accent rail + accent text. Alert badge on Alerts item: polls `/api/alerts/events?open=true`. Collapsed-label toggle planned but not yet wired. |
+| `Topbar.svelte` | Search input (⌘K hint), sync indicator dot, theme toggle, avatar initials chip. |
+
+### Stores (`web/src/lib/stores/`)
+
+| Store | What it holds |
+| --- | --- |
+| `theme.ts` | `ThemeMode` (`dark|light|system`). Reads/writes `localStorage`. Applies `document.documentElement.dataset.theme`. Listens to `prefers-color-scheme` media query when mode is `system`. |
+| `accent.ts` | `AccentKey` (one of 6). Applies `--accent`, `--accent-soft`, `--accent-line` to `:root`. |
+| `hosts.ts` | `Map<string, HostEntry>` — one entry per host. Each entry carries `host`, `latest` metric sample, four 60-sample ring buffers (`cpuSeries`, `memSeries`, `netInSeries`, `netOutSeries`), and a `status` (`online|stale|offline`). Ring buffer push: `buf.slice(-59).concat([val])`. SSE subscriber at `/api/stream/metrics` updates ring buffers live. |
+| `dashboardLayout.ts` | `layout` (rich/tile/list), `pinned` host set, `filter` (tag or "all"), `cardOrder`. Persists to `localStorage` + `/api/settings/dashboard-layout` on change. |
+
+### Dashboard components (`web/src/lib/components/dashboard/`)
+
+| Component | Role |
+| --- | --- |
+| `PageHeader.svelte` | H1 + counts strip: Healthy / Warning / Critical / Offline / Containers / Alerts. |
+| `FilterBar.svelte` | Tag filter pill tabs (derived from all host tags) + Rich/Tile/List segmented control + gradient "Add host" button. |
+| `HostGrid.svelte` | Outer grid container. Switches grid-template-columns by layout. Renders loading skeletons, `EmptyBlock`, or `ErrorBlock` when appropriate. |
+| `HostCard.svelte` | Variant switcher — delegates to `RichCard`, `TileCard`, or `CompactRow`. |
+| `RichCard.svelte` | `minmax(560px, 1fr)`. Left 3px status rail (ok/warn/crit/offline). Sparklines for CPU, Mem, Net. Side info panel (OS/arch, uptime, container counts). Alert footer when `openAlerts > 0`. `⋯` menu button (`stopPropagation`) → `CardMenu`. Click anywhere else → drill-in. |
+| `TileCard.svelte` | `minmax(320px, 1fr)`. 2×2 metric grid: CPU/Mem/Net↓/Temp tiles each with status-colored sparkline. |
+| `CompactRow.svelte` | Single row, 7 columns: status dot, name+kind, OS/arch, CPU%, Mem%, Net↓, tags. |
+| `AddWidgetTile.svelte` | Dashed "+" tile matching the current layout's card size. Turns accent background on hover. |
+| `CardMenu.svelte` | Popover anchored to the `⋯` button. Actions: Pin/Unpin, Open Shell, Restart, Remove. Danger style on Remove. Closes on click-outside. |
+
+### Drill-in components (`web/src/lib/components/host/`)
+
+| Component | Role |
+| --- | --- |
+| `DrillIn.svelte` | Full-height right panel sliding in from the right (260ms `--ease-card`). Backdrop with blur. Sticky header: close btn, `HostKindIcon`, host name, `StatusIndicator`, tag chips, action buttons (Restart/SSH/Update/Stop). Tab nav: Overview / Containers / Stacks / Logs / Shell. Overview: 4-column `BigMetric` grid + 3-column lower panels. Other tabs link to full management pages. Esc and backdrop click close. |
+| `BigMetric.svelte` | Elevated card with 26px mono value, sub label, and `Sparkline`. |
+| `StoragePanel.svelte` | Per-mount rows (name + size) each with a `Meter` bar. Falls back to root disk if no `disk_mounts`. |
+| `ContainersPanel.svelte` | Running/Stopped/Unhealthy stat grid + "Top by CPU" list (up to 4 containers). |
+| `EventsPanel.svelte` | Last 8 alert events. `fired_at` relative time + "Firing/Resolved — rule #N (val)". Warn color / ok color on resolved. |
+
+### Add-host components (`web/src/lib/components/addhost/`)
+
+| Component | Role |
+| --- | --- |
+| `AddHostModal.svelte` | 2-step glass modal (scale-in 220ms). Step 1: `MethodRadio` + method-specific form fields. Step 2: async `VerifyRow` list + install command block for agent method. Calls `api.createAgentToken` on the agent path. |
+| `MethodRadio.svelte` | Three radio cards: Install Agent / Docker API / SSH Probe. Each shows an icon, label, and description. Accent-tinted border + background when selected. |
+| `VerifyRow.svelte` | Displays pending / checking (CSS spinner) / ok / error states with optional detail text. |
+
+### SSE stream (`/api/stream/metrics`)
+
+The hub broadcasts a `SSEEvent` after every successful metric ingest. The browser's `hosts.ts` store subscribes with `new EventSource(...)` and updates its ring buffers on each event. Events are per-host: `{ hostId, cpu, mem, netIn, netOut, ts }`. If SSE is unavailable (hub not running, proxy strips keep-alive) the store falls back to the initial HTTP-loaded snapshot; sparklines just stop updating rather than throwing an error.
+
 | Route | Use & reason |
 | --- | --- |
 | `+layout.ts` | `ssr = false; prerender = false`. Pure SPA: no server rendering, no build-time prerender. The data is live, the hub serves the static fallback `index.html`, the client takes over from there. |
-| `+layout.svelte` | Top nav with the brand and links to "Hosts" and "Alerts". Sticky header so navigation stays in view while scrolling long pages. Polls `/api/alerts/events?open=true` every 5s and renders a red `.badge` next to the Alerts link with the firing count when > 0. The badge is in the layout (rather than the alerts page) so it's visible from anywhere in the app — the main reason to have an alert system in the first place. **Footer** polls `/api/system/info` every 30s and shows `vX.Y.Z · DB <size> · uptime <duration>`. A 1s in-memory clock is used to tick the uptime visibly without re-hitting the API. The DB-path tooltip on hover gives the absolute file path for users who want to know where state is stored. Why a footer rather than a settings page: surface-layer info should be reachable from anywhere, and a single info row beats hiding it behind a click. |
+| `+layout.svelte` | Replaced top-nav with `<AppShell>`. Auth pages render in a centered `.auth-page` wrapper. All other pages render inside the sidebar shell. Alert badge on Alerts nav item via Sidebar. Footer (version/DB/uptime) retained in existing pages. |
 | `alerts/+page.svelte` | The alerts management page. Three tabs: Rules, Events, Channels. **Rules tab**: new rule form (host selector, metric/op dropdowns from `/api/alerts/metadata`, threshold, duration, severity selector), rules table (severity badge, toggle, delete; row tinted red when firing). **Events tab**: event history with state pill, host/rule/value, relative timestamps. **Channels tab**: card list of notification channels (Discord/Slack/ntfy/Gotify/webhook) with type badge, min-severity filter, resolve-notify state, and Test/Edit/Enable/Delete actions; add/edit channel modal (type selector, name, type-specific config fields, min severity, notify-resolve toggle). ESC closes the channel modal via `<svelte:window onkeydown>`. Page title set via `<svelte:head>`. Auto-refresh every 5s. |
 | `+page.svelte` (host list) | Every 5s: fetch `/api/hosts`, then in parallel fetch `latestMetric`, `containers`, and open `alertEvents`. **Host status pills** (online < 15s / stale < 90s / offline ≥ 90s) computed from `last_seen`. **Alert badges** show firing count per host. **Network rate** (↓/↑) in footer when either direction > 500 B/s — derived from consecutive `latest`/`prevLatest` sample deltas. Card border tints: stale = amber, offline = red, alert = red. `absTime` tooltip on the "seen X ago" span. Dynamic page title. |
 | `hosts/[id]/+page.svelte` | Host detail. Fetches host, metrics history, latest, net/mount/diskIO history, and open alerts for this host in parallel. **Alert banner** (red) lists firing count + metric names with a link to `/alerts`. **Stale/offline banners** (amber/red) shown when `last_seen` age >= 15s/90s. **Status pill** in h1. Dynamic title (`Aperture — {host.name}`). `absTime` tooltip on relative-time spans. All other monitoring sections unchanged. |

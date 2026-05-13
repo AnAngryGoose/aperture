@@ -52,3 +52,10 @@ export function absTime(val: string | number): string {
 		hour: 'numeric', minute: '2-digit', second: '2-digit'
 	});
 }
+
+// Short aliases used by the new UI components.
+export const fmtBytes = formatBytes;
+export const fmtRate = formatBytesRate;
+export const fmtDuration = formatDuration;
+export const fmtRelative = relTime;
+export const fmtAbsolute = absTime;
