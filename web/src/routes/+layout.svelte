@@ -1,11 +1,9 @@
 <script lang="ts">
 	import 'uplot/dist/uPlot.min.css';
 	import '$lib/styles/global.css';
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
-	import { toast } from '$lib/toast';
 	import Toast from '$lib/Toast.svelte';
 	import AppShell from '$lib/components/shell/AppShell.svelte';
 
@@ -27,7 +25,11 @@
 		authReady = true;
 	}
 
-	onMount(() => { checkAuth(); });
+	// Re-run on every URL change so returning from /login sets authReady correctly.
+	// onMount fires only once; navigating /login → / would leave authReady=false forever.
+	$effect(() => {
+		if (!isAuthPage && !authReady) checkAuth();
+	});
 </script>
 
 {#if isAuthPage}
