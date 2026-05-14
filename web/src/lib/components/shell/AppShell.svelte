@@ -36,5 +36,9 @@
 
 	.content {
 		flex: 1;
+		padding: 22px 28px 60px;
+		max-width: 1600px;
+		width: 100%;
+		margin: 0 auto;
 	}
 </style>

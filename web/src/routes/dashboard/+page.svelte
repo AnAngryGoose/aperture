@@ -106,9 +106,6 @@
 
 <style>
 	.dashboard {
-		padding: 22px 28px 60px;
-		max-width: 1600px;
-		margin: 0 auto;
 		display: flex;
 		flex-direction: column;
 		gap: 16px;
