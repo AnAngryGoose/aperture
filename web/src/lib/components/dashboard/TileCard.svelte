@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { HostEntry } from '$lib/stores/hosts';
+	import type { HostEntry } from '$lib/stores/hosts.svelte';
 	import Sparkline from '$lib/components/primitives/Sparkline.svelte';
 	import StatusIndicator from '$lib/components/primitives/StatusIndicator.svelte';
 	import HostKindIcon from '$lib/components/primitives/HostKindIcon.svelte';
@@ -38,7 +38,7 @@
 	<div class="metrics">
 		<div class="metric">
 			<span class="metric-label label-mono">CPU</span>
-			<span class="metric-val mono">{(s?.cpu_pct ?? 0).toFixed(0)}%</span>
+			<span class="metric-val mono">{(s?.cpu_percent ?? 0).toFixed(0)}%</span>
 			<Sparkline data={entry.cpuSeries} width={120} height={22} color="var(--accent)" />
 		</div>
 		<div class="metric">
@@ -48,7 +48,7 @@
 		</div>
 		<div class="metric">
 			<span class="metric-label label-mono">NET ↓</span>
-			<span class="metric-val mono">{fmtRate(s?.net_rx ?? 0)}</span>
+			<span class="metric-val mono">{fmtRate(s?.net_rx_bytes ?? 0)}</span>
 			<Sparkline data={entry.netInSeries} width={120} height={22} color="var(--info)" />
 		</div>
 		<div class="metric">

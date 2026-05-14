@@ -10,12 +10,15 @@
 
 	const running = $derived(containers.filter((c) => c.state === 'running').length);
 	const stopped = $derived(containers.filter((c) => c.state === 'exited').length);
-	const unhealthy = $derived(containers.filter((c) => c.health === 'unhealthy').length);
+	// Container type has no `health` field; derive unhealthy from status text instead.
+	const unhealthy = $derived(
+		containers.filter((c) => /unhealthy/i.test(c.status ?? '')).length
+	);
 
 	const topByCpu = $derived(
 		[...containers]
 			.filter((c) => c.state === 'running')
-			.sort((a, b) => (b.cpu_pct ?? 0) - (a.cpu_pct ?? 0))
+			.sort((a, b) => (b.cpu_percent ?? 0) - (a.cpu_percent ?? 0))
 			.slice(0, 4)
 	);
 </script>
@@ -44,7 +47,7 @@
 			{#each topByCpu as c}
 				<div class="top-row mono">
 					<span class="top-name">{c.name}</span>
-					<span class="top-cpu text-faint">{(c.cpu_pct ?? 0).toFixed(1)}%</span>
+					<span class="top-cpu text-faint">{(c.cpu_percent ?? 0).toFixed(1)}%</span>
 					<span class="top-mem text-faint">{((c.mem_usage ?? 0) / 1e9).toFixed(1)} GB</span>
 				</div>
 			{/each}

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { HostEntry } from '$lib/stores/hosts';
+	import type { HostEntry } from '$lib/stores/hosts.svelte';
 
 	interface Props {
 		entry: HostEntry;

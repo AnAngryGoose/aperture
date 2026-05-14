@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { HostStatus } from '$lib/stores/hosts';
+	import type { HostStatus } from '$lib/stores/hosts.svelte';
 
 	interface Props {
 		status: HostStatus;

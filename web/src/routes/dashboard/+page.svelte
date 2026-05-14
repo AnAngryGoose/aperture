@@ -1,15 +1,15 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api';
-	import { hostStore } from '$lib/stores/hosts';
-	import { dashboardLayout } from '$lib/stores/dashboardLayout';
+	import { hostStore } from '$lib/stores/hosts.svelte';
+	import { dashboardLayout } from '$lib/stores/dashboardLayout.svelte';
 	import { toast } from '$lib/toast';
 	import PageHeader from '$lib/components/dashboard/PageHeader.svelte';
 	import FilterBar from '$lib/components/dashboard/FilterBar.svelte';
 	import HostGrid from '$lib/components/dashboard/HostGrid.svelte';
 	import DrillIn from '$lib/components/host/DrillIn.svelte';
 	import AddHostModal from '$lib/components/addhost/AddHostModal.svelte';
-	import type { HostEntry } from '$lib/stores/hosts';
+	import type { HostEntry } from '$lib/stores/hosts.svelte';
 
 	let loading = $state(true);
 	let error = $state<string | null>(null);

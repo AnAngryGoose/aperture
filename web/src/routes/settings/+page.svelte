@@ -5,8 +5,8 @@
 	import type { AgentToken } from '$lib/types';
 	import { toast } from '$lib/toast';
 	import { absTime, relTime } from '$lib/format';
-	import { theme } from '$lib/stores/theme';
-	import { accent, ACCENTS, type AccentKey } from '$lib/stores/accent';
+	import { theme } from '$lib/stores/theme.svelte';
+	import { accent, ACCENTS, type AccentKey } from '$lib/stores/accent.svelte';
 
 	// ── password change ───────────────────────────────────────────────────────
 	let pwCurrent  = $state('');

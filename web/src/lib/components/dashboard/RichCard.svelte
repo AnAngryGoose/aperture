@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { HostEntry } from '$lib/stores/hosts';
+	import type { HostEntry } from '$lib/stores/hosts.svelte';
 	import Sparkline from '$lib/components/primitives/Sparkline.svelte';
 	import StatusIndicator from '$lib/components/primitives/StatusIndicator.svelte';
 	import HostKindIcon from '$lib/components/primitives/HostKindIcon.svelte';
@@ -20,8 +20,8 @@
 	const kind = $derived((entry.host.kind as 'docker' | 'linux' | 'edge') || 'linux');
 
 	const cpuColor = $derived(
-		(s?.cpu_pct ?? 0) >= 85 ? 'var(--crit)' :
-		(s?.cpu_pct ?? 0) >= 70 ? 'var(--warn)' :
+		(s?.cpu_percent ?? 0) >= 85 ? 'var(--crit)' :
+		(s?.cpu_percent ?? 0) >= 70 ? 'var(--warn)' :
 		'var(--accent)'
 	);
 
@@ -98,7 +98,7 @@
 			<div class="metric-row">
 				<span class="metric-label label-mono">CPU</span>
 				<Sparkline data={entry.cpuSeries} color={cpuColor} height={26} />
-				<span class="metric-val mono" style="color:{cpuColor}">{(s?.cpu_pct ?? 0).toFixed(0)}%</span>
+				<span class="metric-val mono" style="color:{cpuColor}">{(s?.cpu_percent ?? 0).toFixed(0)}%</span>
 			</div>
 			<div class="metric-row">
 				<span class="metric-label label-mono">MEM</span>
@@ -109,7 +109,7 @@
 				<span class="metric-label label-mono">NET</span>
 				<Sparkline data={entry.netInSeries} color="var(--info)" height={26} />
 				<span class="metric-val mono">
-					<span class="arr">↓</span>{fmtRate(s?.net_rx ?? 0)}
+					<span class="arr">↓</span>{fmtRate(s?.net_rx_bytes ?? 0)}
 				</span>
 			</div>
 		</div>

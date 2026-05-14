@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { HostEntry } from '$lib/stores/hosts';
-	import type { CardLayout } from '$lib/stores/dashboardLayout';
+	import type { HostEntry } from '$lib/stores/hosts.svelte';
+	import type { CardLayout } from '$lib/stores/dashboardLayout.svelte';
 	import RichCard from './RichCard.svelte';
 	import TileCard from './TileCard.svelte';
 	import CompactRow from './CompactRow.svelte';

@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { HostEntry } from '$lib/stores/hosts';
-	import type { CardLayout } from '$lib/stores/dashboardLayout';
+	import type { HostEntry } from '$lib/stores/hosts.svelte';
+	import type { CardLayout } from '$lib/stores/dashboardLayout.svelte';
 	import HostCard from './HostCard.svelte';
 	import AddWidgetTile from './AddWidgetTile.svelte';
 	import SkeletonCard from '$lib/components/primitives/SkeletonCard.svelte';

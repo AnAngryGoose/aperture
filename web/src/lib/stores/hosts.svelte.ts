@@ -26,8 +26,8 @@ function deriveStatus(sample: MetricSample | null, lastSeen: string | null): Hos
 	const age = Date.now() - new Date(lastSeen).getTime();
 	if (age > 120_000) return 'offline';
 	if (!sample) return 'offline';
-	if (sample.cpu_pct >= 90 || sample.mem_percent >= 90 || sample.disk_pct >= 90) return 'crit';
-	if (sample.cpu_pct >= 70 || sample.mem_percent >= 80 || sample.disk_pct >= 80) return 'warn';
+	if (sample.cpu_percent >= 90 || sample.mem_percent >= 90 || sample.disk_percent >= 90) return 'crit';
+	if (sample.cpu_percent >= 70 || sample.mem_percent >= 80 || sample.disk_percent >= 80) return 'warn';
 	return 'ok';
 }
 
@@ -38,10 +38,10 @@ function createHostStore() {
 
 	function upsertHost(host: Host, sample: MetricSample | null) {
 		const prev = entries[host.id];
-		const cpu = sample?.cpu_pct ?? prev?.latest?.cpu_pct ?? 0;
+		const cpu = sample?.cpu_percent ?? prev?.latest?.cpu_percent ?? 0;
 		const mem = sample?.mem_percent ?? prev?.latest?.mem_percent ?? 0;
-		const netIn = sample?.net_rx ?? prev?.latest?.net_rx ?? 0;
-		const netOut = sample?.net_tx ?? prev?.latest?.net_tx ?? 0;
+		const netIn = sample?.net_rx_bytes ?? prev?.latest?.net_rx_bytes ?? 0;
+		const netOut = sample?.net_tx_bytes ?? prev?.latest?.net_tx_bytes ?? 0;
 		const ts = sample ? Date.now() / 1000 : (prev?.tsSeries.at(-1) ?? Date.now() / 1000);
 
 		entries[host.id] = {
@@ -73,11 +73,11 @@ function createHostStore() {
 				if (!entry) return;
 				const sample: MetricSample = {
 					...entry.latest,
-					cpu_pct: data.cpu,
+					cpu_percent: data.cpu,
 					mem_percent: data.mem,
-					net_rx: data.netIn,
-					net_tx: data.netOut,
-					ts: data.ts
+					net_rx_bytes: data.netIn,
+					net_tx_bytes: data.netOut,
+					timestamp: new Date((data.ts ?? Date.now() / 1000) * 1000).toISOString()
 				} as MetricSample;
 				upsertHost(entry.host, sample);
 			} catch { /* ignore malformed */ }

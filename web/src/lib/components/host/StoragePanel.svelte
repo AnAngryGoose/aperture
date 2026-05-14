@@ -32,7 +32,7 @@
 					{fmtBytes(sample.disk_used ?? 0)} / {fmtBytes(sample.disk_total ?? 0)}
 				</span>
 			</div>
-			<Meter value={sample.disk_pct ?? 0} max={100} />
+			<Meter value={sample.disk_percent ?? 0} max={100} />
 		</div>
 	{:else}
 		<span class="empty text-faint">No data</span>

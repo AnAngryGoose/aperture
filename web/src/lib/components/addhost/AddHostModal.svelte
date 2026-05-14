@@ -58,9 +58,8 @@
 				const tok = await api.createAgentToken(hostName.trim());
 				generatedToken = tok.token ?? '';
 				verifyRows[0] = { label: 'Enrollment token ready', status: 'ok', detail: tok.name };
-				const proto = window.location.protocol;
-				const host = window.location.host;
-				generatedCmd = `curl -sSL ${proto}//${host}/install.sh | APERTURE_TOKEN=${generatedToken} bash`;
+				const hubOrigin = window.location.origin;
+				generatedCmd = `aperture-agent --hub ${hubOrigin} --token ${generatedToken}`;
 				verifyRows[1] = { label: 'Install command ready', status: 'ok' };
 			} catch (e: unknown) {
 				const msg = e instanceof Error ? e.message : String(e);

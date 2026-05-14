@@ -2,9 +2,6 @@
 	import type { Snippet } from 'svelte';
 	import Sidebar from './Sidebar.svelte';
 	import Topbar from './Topbar.svelte';
-	import { theme } from '$lib/stores/theme';
-	import { accent } from '$lib/stores/accent';
-	import { onMount } from 'svelte';
 
 	interface Props {
 		children: Snippet;
@@ -12,11 +9,6 @@
 	}
 
 	let { children, onrefresh }: Props = $props();
-
-	onMount(() => {
-		theme.init();
-		accent.init();
-	});
 </script>
 
 <div class="shell">

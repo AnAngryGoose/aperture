@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { dashboardLayout, type CardLayout } from '$lib/stores/dashboardLayout';
-	import { hostStore } from '$lib/stores/hosts';
+	import { dashboardLayout, type CardLayout } from '$lib/stores/dashboardLayout.svelte';
+	import { hostStore } from '$lib/stores/hosts.svelte';
 	import Icon from '$lib/components/primitives/Icon.svelte';
 
 	interface Props {

@@ -1,33 +1,50 @@
-# Build outputs
+# ── Build outputs ───────────────────────────────────────────────────────────
 /bin/
-
-# Local SQLite database (and its WAL / SHM journal companions)
-aperture.db
-aperture.db-shm
-aperture.db-wal
-*.db
-*.db-shm
-*.db-wal
-
-# Frontend build artifacts
 /web/build/
 /web/.svelte-kit/
 /web/node_modules/
+/dist/
 
-# Editor / OS
-.DS_Store
-.vscode/
-.idea/
-*.swp
-*.swo
+# Go test + coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# ── Runtime state ───────────────────────────────────────────────────────────
+# Local SQLite database (and its WAL / SHM journal companions)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
 
 # Logs
 *.log
+logs/
 
-# Local env files (never commit secrets or per-host overrides)
+# ── Local config / secrets ──────────────────────────────────────────────────
+# Catches .env, .env.local, .env.production, etc. anywhere in the tree.
 .env
-.env.local
+.env.*
+!.env.example
 
-# Note: /opt/aperture-roadmap.docx lives outside this repo and is intentionally not vendored.
+# ── Editor / OS noise ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*.swn
+*~
+.*.swp
+
+# ── Working / scratch files ─────────────────────────────────────────────────
+# Annotated bug log used during reviews — local working doc, not shipped.
 ISSUES.md
-.gitignore
+*.bak
+*.orig
+*.tmp
+scratch/
+tmp/

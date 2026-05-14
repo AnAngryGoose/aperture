@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { theme } from '$lib/stores/theme';
-	import { hostStore } from '$lib/stores/hosts';
+	import { theme } from '$lib/stores/theme.svelte';
+	import { hostStore } from '$lib/stores/hosts.svelte';
 	import Icon from '$lib/components/primitives/Icon.svelte';
 	import Kbd from '$lib/components/primitives/Kbd.svelte';
 	import { fmtRelative } from '$lib/format';

@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import Icon from '$lib/components/primitives/Icon.svelte';
-	import { hostStore } from '$lib/stores/hosts';
+	import { hostStore } from '$lib/stores/hosts.svelte';
 
 	const WORKSPACE = [
 		{ href: '/dashboard', icon: 'dashboard', label: 'Dashboard' },
@@ -36,7 +36,7 @@
 		</div>
 		<div class="brand-text">
 			<span class="brand-name">Aperture</span>
-			<span class="brand-version mono">v0.4.0-dev</span>
+			<span class="brand-version mono">v0.4.0-alpha.2</span>
 		</div>
 	</a>
 
@@ -44,7 +44,7 @@
 	<nav class="nav-section">
 		<span class="section-label label-mono">Workspace</span>
 		{#each WORKSPACE as item}
-			{@const active = $page.url.pathname.startsWith(item.href)}
+			{@const active = page.url.pathname.startsWith(item.href)}
 			<a href={item.href} class="nav-item" class:active>
 				<Icon name={item.icon} size={16} />
 				<span>{item.label}</span>
@@ -56,7 +56,7 @@
 	<nav class="nav-section">
 		<span class="section-label label-mono">Observe</span>
 		{#each OBSERVE as item}
-			{@const active = $page.url.pathname.startsWith(item.href)}
+			{@const active = page.url.pathname.startsWith(item.href)}
 			<a href={item.href} class="nav-item" class:active>
 				<Icon name={item.icon} size={16} />
 				<span>{item.label}</span>
@@ -69,7 +69,7 @@
 
 	<!-- Bottom -->
 	<div class="sidebar-bottom">
-		<a href="/settings" class="nav-item" class:active={$page.url.pathname.startsWith('/settings')}>
+		<a href="/settings" class="nav-item" class:active={page.url.pathname.startsWith('/settings')}>
 			<Icon name="settings" size={16} />
 			<span>Settings</span>
 		</a>

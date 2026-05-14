@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { hostStore } from '$lib/stores/hosts';
+	import { hostStore } from '$lib/stores/hosts.svelte';
 	import { fmtAbsolute } from '$lib/format';
 
 	const totals = $derived.by(() => {

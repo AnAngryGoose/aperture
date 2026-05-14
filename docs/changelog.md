@@ -549,7 +549,7 @@ Wave 1 — Correctness pass. Fixes silent alert failures, terminal double-encodi
 
 ---
 
-## [0.4.0-alpha.1] — 2026-05-12
+## [0.4.0-alpha.2] — 2026-05-13
 
 Full UI redesign. Replaces the single-column top-nav SPA with a sidebar shell, new design token system, three-variant host dashboard cards, live-streaming sparklines, host drill-in slide-over panel, and Settings → Appearance.
 

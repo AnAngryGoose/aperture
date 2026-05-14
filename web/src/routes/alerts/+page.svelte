@@ -159,7 +159,7 @@
 			const [rs, es, hs, chs] = await Promise.all([
 				api.alertRules(),
 				api.alertEvents({ limit: 100 }),
-				api.hosts(),
+				api.hosts.list(),
 				api.alertChannels()
 			]);
 			rules    = rs;

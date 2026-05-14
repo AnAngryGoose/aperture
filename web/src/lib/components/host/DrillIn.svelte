@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import type { HostEntry } from '$lib/stores/hosts';
+	import type { HostEntry } from '$lib/stores/hosts.svelte';
 	import type { Container, AlertEvent } from '$lib/types';
 	import { api } from '$lib/api';
 	import { fmtBytes, fmtRate, fmtDuration } from '$lib/format';
@@ -104,7 +104,7 @@
 				<div class="big-metrics">
 					<BigMetric
 						label="CPU"
-						value="{(s?.cpu_pct ?? 0).toFixed(1)}%"
+						value="{(s?.cpu_percent ?? 0).toFixed(1)}%"
 						sub="{entry.host.cpu_count} cores · {entry.host.cpu_model || '—'}"
 						data={entry.cpuSeries}
 					/>
@@ -116,8 +116,8 @@
 					/>
 					<BigMetric
 						label="Network ↓"
-						value={fmtRate(s?.net_rx ?? 0)}
-						sub="↑ {fmtRate(s?.net_tx ?? 0)}"
+						value={fmtRate(s?.net_rx_bytes ?? 0)}
+						sub="↑ {fmtRate(s?.net_tx_bytes ?? 0)}"
 						data={entry.netInSeries}
 						color="var(--info)"
 					/>

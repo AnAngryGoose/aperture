@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { HostKind } from '$lib/stores/hosts';
+	import type { HostKind } from '$lib/stores/hosts.svelte';
 	import Icon from './Icon.svelte';
 
 	interface Props {
