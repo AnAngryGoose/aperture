@@ -21,10 +21,7 @@
 
 	async function load() {
 		try {
-			const [hosts, samples] = await Promise.all([
-				api.hosts.list(),
-				Promise.all([]).then(() => ({})) // batch latest metrics if needed
-			]);
+			const hosts = await api.hosts.list();
 			// Fetch latest metrics per host in parallel.
 			const metricResults = await Promise.allSettled(
 				hosts.map((h) => api.latest(h.id))
@@ -36,6 +33,23 @@
 			});
 			hostStore.setAll(hosts, sampleMap);
 			error = null;
+
+			// Fetch container counts for docker-kind hosts in parallel and propagate.
+			// Failures per-host are silent — the card just keeps showing — until the next poll.
+			const dockerHosts = hosts.filter((h) => h.kind === 'docker');
+			const containerResults = await Promise.allSettled(
+				dockerHosts.map((h) => api.containers(h.id, true))
+			);
+			dockerHosts.forEach((h, i) => {
+				const r = containerResults[i];
+				if (r.status !== 'fulfilled') return;
+				const list = r.value;
+				hostStore.setContainerCounts(h.id, {
+					running: list.filter((c) => c.state === 'running').length,
+					stopped: list.filter((c) => c.state !== 'running').length,
+					unhealthy: list.filter((c) => /unhealthy/i.test(c.status ?? '')).length
+				});
+			});
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load hosts';
 		} finally {

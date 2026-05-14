@@ -562,10 +562,12 @@ Full UI redesign. Replaces the single-column top-nav SPA with a sidebar shell, n
 
 ### Added — Stores
 
-- **`web/src/lib/stores/theme.ts`** — `ThemeMode` store (`dark|light|system`). Reads/writes `localStorage`. Applies `document.documentElement.dataset.theme`. Watches `prefers-color-scheme` media query when mode is `system`.
-- **`web/src/lib/stores/accent.ts`** — `AccentKey` store with six options. Applies `--accent`, `--accent-soft`, `--accent-line` to `:root` on change and on init.
-- **`web/src/lib/stores/hosts.ts`** — `HostEntry` map with 60-sample ring buffer per host (`cpuSeries`, `memSeries`, `netInSeries`, `netOutSeries`, `tsSeries`). `HostStatus` derived from `last_seen` age. SSE subscription to `/api/stream/metrics` updates the ring buffer live.
-- **`web/src/lib/stores/dashboardLayout.ts`** — Card layout (`rich|tile|list`), pinned host set, active tag filter, and card order. Persists to `localStorage` and syncs to `/api/settings/dashboard-layout`.
+All four reactive stores use the `.svelte.ts` extension (required for Svelte 5 runes to compile — plain `.ts` silently passes through the compiler and crashes at runtime with `ReferenceError: $state is not defined`).
+
+- **`web/src/lib/stores/theme.svelte.ts`** — `ThemeMode` store (`dark|light|system`). Reads/writes `localStorage`. Applies `document.documentElement.dataset.theme`. Watches `prefers-color-scheme` media query when mode is `system`.
+- **`web/src/lib/stores/accent.svelte.ts`** — `AccentKey` store with six options. Applies `--accent`, `--accent-soft`, `--accent-line` to `:root` on change and on init.
+- **`web/src/lib/stores/hosts.svelte.ts`** — `HostEntry` map with 60-sample ring buffer per host (`cpuSeries`, `memSeries`, `netInSeries`, `netOutSeries`, `tsSeries`). `HostStatus` derived from `last_seen` age. SSE subscription to `/api/stream/metrics` updates the ring buffer live.
+- **`web/src/lib/stores/dashboardLayout.svelte.ts`** — Card layout (`rich|tile|list`), pinned host set, active tag filter, and card order. Persists to `localStorage` and syncs to `/api/settings/dashboard-layout`.
 
 ### Added — Primitives
 
@@ -636,10 +638,32 @@ Full UI redesign. Replaces the single-column top-nav SPA with a sidebar shell, n
 
 - `/containers`, `/stacks`, `/storage`, `/network`, `/logs`, `/shell`, `/automation` — stub pages with "Coming soon" message so sidebar nav links don't 404.
 
+### Fixed — Post-redesign hardening pass
+
+The first dashboard load after the v0.4 cut produced a completely black screen. Fixed in order of discovery:
+
+- **Stores using runes were `.ts`, not `.svelte.ts`.** The Svelte compiler silently skips plain `.ts` files, so `$state(...)` references survived into the bundle as undefined globals → `ReferenceError: $state is not defined` at first import → blank page before any render. Renamed all four stores to `.svelte.ts` and updated all 16 importing files. **This is the canonical Svelte 5 rune-extension gotcha; documented in `docs/ui-context.md` so future contributors hit it once at most.**
+- **Field name mismatches across new components.** Components referenced `cpu_pct`, `net_rx`, `net_tx`, `disk_pct`, and Container `.health` — none of which exist on the real types. The actual fields are `cpu_percent`, `net_rx_bytes`, `net_tx_bytes`, `disk_percent`, and Container has no `.health` field (now derived from `status` text via regex). With `??` fallbacks everywhere these silently evaluated to zero, so the dashboard rendered but every metric was empty. Caught by `svelte-check`; `npm run build` did **not** catch them.
+- **Auth flow left `authReady=false` after login redirect.** `checkAuth()` was called once from `onMount`. When it redirected to `/login` via early `return`, `authReady` was never set. Layouts don't remount across nav, so after successful login the layout would re-render at `/dashboard` with `authReady` still false → empty body. Replaced `onMount(checkAuth)` with `$effect(() => { if (!isAuthPage && !authReady) checkAuth(); })` so the effect re-runs whenever the URL changes.
+- **No visible loading or error state.** Layout previously rendered `{:else if authReady}` with no `else` branch — pure-black body while async auth was pending. Added a centered spinner ("Loading Aperture…") for the loading case and a red error card with a Reload button for the error case. Also wired global `window.addEventListener('error' / 'unhandledrejection')` listeners to populate `bootError`, so future JS crashes can't go silent.
+- **Root redirect via `onMount(goto)` produced an empty-mount flash.** Replaced `+page.svelte`'s `onMount(() => goto('/dashboard'))` with a `+page.ts` `load()` that `throw redirect(307, '/dashboard')`. SvelteKit handles the redirect before mounting the empty root page.
+- **`api.hosts()` regression in alerts page.** Namespacing `api.hosts` as an object broke the existing `api.hosts()` call site in `alerts/+page.svelte`. Updated to `api.hosts.list()`.
+- **AddHostModal install command pointed to `/install.sh` which doesn't exist.** Replaced with the real `aperture-agent --hub ... --token ...` command, matching the existing settings-page pattern.
+- **Sidebar still used `$app/stores`** while the rest of the new code uses `$app/state`. Migrated for consistency.
+- **Binary versions were out of sync.** `cmd/hub` and `cmd/agent` were still at `0.3.0-alpha.3` when the changelog rolled forward to `0.4.0`. All version sites (cmd/hub `Version`, cmd/agent `agentVersion`, sidebar brand chip, changelog header, overview.md) bumped together to `0.4.0-alpha.2`.
+
+### Project structure
+
+- **Docs moved to `/opt/aperture/docs/`.** `changelog.md`, `overview.md`, `technical.md`, `ui-plan.md`, plus the historical `aperture_project_review_and_plan.md` and `aperture-roadmap.docx`. Repo root now contains only build/code files. Doc-maintenance rule still applies — every code change updates the relevant doc in the same commit.
+- **`docs/ui-context.md`** — new handoff doc. Self-contained brief for a fresh contributor (or Claude instance) picking up UI work: stack, rune rules, token system, file layout, stores, backend touchpoints, gotchas, all 20+ outstanding known issues, and a "what to paste into a new chat" template.
+- **`.gitignore`** — rewritten. Broader env coverage (`.env.*` with `.env.example` opt-out), Go test/coverage outputs, `dist/`, more editor variants. Removed the self-referential `.gitignore` line and the stale "aperture-roadmap.docx lives outside the repo" comment.
+
 ### Verified
 
-- `npm run build` — clean, no TypeScript errors.
+- `cd web && npm run build` — clean.
+- `cd web && npx svelte-check` — 0 errors in any v0.4 file. 64 pre-existing errors remain in legacy pages (all `string | undefined → string` route-param narrowing); these don't affect runtime and aren't in scope for the UI redesign.
 - `go build ./...` — clean.
+- Browser smoke: first-run flow (setup → dashboard), refresh persists session, theme/accent persists across reload, drill-in opens on card click and closes on Esc.
 
 ---
 

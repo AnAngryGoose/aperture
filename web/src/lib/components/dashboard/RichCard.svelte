@@ -7,6 +7,10 @@
 	import CardMenu from './CardMenu.svelte';
 	import { fmtBytes, fmtRate, fmtDuration } from '$lib/format';
 
+	function fmtCount(n: number | undefined): string {
+		return typeof n === 'number' ? String(n) : '—';
+	}
+
 	interface Props {
 		entry: HostEntry;
 		onclick?: () => void;
@@ -109,7 +113,7 @@
 				<span class="metric-label label-mono">NET</span>
 				<Sparkline data={entry.netInSeries} color="var(--info)" height={26} />
 				<span class="metric-val mono">
-					<span class="arr">↓</span>{fmtRate(s?.net_rx_bytes ?? 0)}
+					<span class="arr">↓</span>{fmtRate(entry.netInRate)}
 				</span>
 			</div>
 		</div>
@@ -122,15 +126,18 @@
 			{#if kind === 'docker'}
 				<div class="container-stats">
 					<div class="cstat">
-						<span class="cstat-val mono" style="color:var(--ok)">—</span>
+						<span class="cstat-val mono" style="color:var(--ok)">{fmtCount(entry.containers?.running)}</span>
 						<span class="cstat-label">Running</span>
 					</div>
 					<div class="cstat">
-						<span class="cstat-val mono text-faint">—</span>
+						<span class="cstat-val mono text-faint">{fmtCount(entry.containers?.stopped)}</span>
 						<span class="cstat-label">Stopped</span>
 					</div>
 					<div class="cstat">
-						<span class="cstat-val mono">—</span>
+						<span
+							class="cstat-val mono"
+							style="color:{(entry.containers?.unhealthy ?? 0) > 0 ? 'var(--crit)' : 'var(--text-dim)'}"
+						>{fmtCount(entry.containers?.unhealthy)}</span>
 						<span class="cstat-label">Unhealthy</span>
 					</div>
 				</div>

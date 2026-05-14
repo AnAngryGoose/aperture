@@ -116,8 +116,8 @@
 					/>
 					<BigMetric
 						label="Network ↓"
-						value={fmtRate(s?.net_rx_bytes ?? 0)}
-						sub="↑ {fmtRate(s?.net_tx_bytes ?? 0)}"
+						value={fmtRate(entry.netInRate)}
+						sub="↑ {fmtRate(entry.netOutRate)}"
 						data={entry.netInSeries}
 						color="var(--info)"
 					/>

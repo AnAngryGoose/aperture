@@ -53,7 +53,7 @@
 	<!-- NET -->
 	<div class="metric-cell">
 		<Sparkline data={entry.netInSeries} width={80} height={20} color="var(--info)" />
-		<span class="pct mono">{fmtRate(s?.net_rx_bytes ?? 0)}</span>
+		<span class="pct mono">{fmtRate(entry.netInRate)}</span>
 	</div>
 
 	<!-- Uptime -->

@@ -48,7 +48,7 @@
 		</div>
 		<div class="metric">
 			<span class="metric-label label-mono">NET ↓</span>
-			<span class="metric-val mono">{fmtRate(s?.net_rx_bytes ?? 0)}</span>
+			<span class="metric-val mono">{fmtRate(entry.netInRate)}</span>
 			<Sparkline data={entry.netInSeries} width={120} height={22} color="var(--info)" />
 		</div>
 		<div class="metric">

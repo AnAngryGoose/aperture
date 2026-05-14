@@ -270,6 +270,7 @@
 <svelte:head><title>Aperture — {hostName || id} — Containers</title></svelte:head>
 <svelte:window onkeydown={handleKeydown} />
 
+<div class="page-pad">
 <div class="page-header">
 	<div>
 		<a href={`/hosts/${id}`} class="back">← back to host</a>
@@ -525,6 +526,7 @@
 		</tbody>
 	</table>
 </div>
+</div>
 
 <!-- Logs modal -->
 {#if logsFor}
@@ -650,6 +652,11 @@
 {/if}
 
 <style>
+	.page-pad {
+		padding: 22px 28px 60px;
+		max-width: 1600px;
+		margin: 0 auto;
+	}
 	.page-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
 	.back { font-size: 12px; color: var(--text-dim); }
 	h1 { margin: 4px 0; font-size: 22px; font-weight: 600; }
