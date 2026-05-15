@@ -22,7 +22,15 @@ import type {
 	VolumeCreateSpec,
 	DockerImage,
 	ImageUpdateStatus,
-	ComposeVersion
+	ComposeVersion,
+	MonitoringOverview,
+	MonitoringBundle,
+	MonitoringCatalog,
+	HostConfig,
+	TempHistory,
+	CPUCoreHistory,
+	ProcessHistory,
+	ContainerHistory
 } from './types';
 
 // In dev, the SvelteKit dev server runs on :5173 and the Go hub on :8080.
@@ -258,5 +266,35 @@ export const api = {
 	) =>
 		send<ComposeStack>(`/api/hosts/${hostID}/compose`, 'POST', body),
 	deleteComposeStack: (hostID: string, project: string, volumes = false) =>
-		del(`/api/hosts/${hostID}/compose/${encodeURIComponent(project)}${volumes ? '?volumes=true' : ''}`)
+		del(`/api/hosts/${hostID}/compose/${encodeURIComponent(project)}${volumes ? '?volumes=true' : ''}`),
+
+	// ── Monitoring spine (Compartment 2) ──────────────────────────────────────
+	// Aggregated endpoints the v0.5 dashboard and host-detail page use as
+	// their primary data source. Replace the prior N+1 polling.
+	monitoring: {
+		overview: () => get<MonitoringOverview>('/api/monitoring/overview'),
+		catalog: () => get<MonitoringCatalog>('/api/monitoring/catalog'),
+		bundle: (hostID: string, range = '1h', points = 300, include?: string[]) => {
+			const q = new URLSearchParams({ range, points: String(points) });
+			if (include?.length) q.set('include', include.join(','));
+			return get<MonitoringBundle>(`/api/hosts/${hostID}/monitoring/bundle?${q}`);
+		}
+	},
+
+	hostConfig: {
+		get: (hostID: string) => get<HostConfig>(`/api/hosts/${hostID}/config`),
+		put: (hostID: string, cfg: Partial<HostConfig>) =>
+			send<{ ok: boolean; warning?: string }>(`/api/hosts/${hostID}/config`, 'PUT', cfg)
+	},
+
+	// Per-metric history (used for single-chart drill-ins; bundle returns
+	// these inline as well).
+	tempHistory: (hostID: string, range = '1h', points = 300) =>
+		get<TempHistory>(`/api/hosts/${hostID}/metrics/temps?range=${range}&points=${points}`),
+	cpuCoreHistory: (hostID: string, range = '1h', points = 300) =>
+		get<CPUCoreHistory>(`/api/hosts/${hostID}/metrics/cpu?range=${range}&points=${points}`),
+	processHistory: (hostID: string, name: string, range = '1h', points = 300) =>
+		get<ProcessHistory>(`/api/hosts/${hostID}/metrics/procs?name=${encodeURIComponent(name)}&range=${range}&points=${points}`),
+	containerMetricsHistory: (hostID: string, cid: string, range = '1h', points = 300) =>
+		get<ContainerHistory>(`/api/hosts/${hostID}/containers/${cid}/metrics?range=${range}&points=${points}`)
 };

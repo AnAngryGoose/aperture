@@ -337,3 +337,169 @@ export interface ComposeStack {
 	running_count: number;
 	total_count: number;
 }
+
+// ── Monitoring (Compartment 2 API spine) ────────────────────────────────────
+
+export interface ContainerCounts {
+	running: number;
+	stopped: number;
+	unhealthy: number;
+	total: number;
+}
+
+export type HostStatus = 'ok' | 'warn' | 'crit' | 'offline';
+
+export interface MonitoringOverview {
+	hosts: Host[];
+	latest: Record<string, MetricSample | null>;
+	containers: Record<string, ContainerCounts>;
+	openAlerts: Record<string, number>;
+	status: Record<string, HostStatus>;
+	ts: number;
+}
+
+export interface TempHistory {
+	timestamps: number[];
+	sensors: Record<string, number[]>;
+}
+
+export interface CPUCoreHistory {
+	timestamps: number[];
+	cores: Record<number, number[]>;
+	aggregate: number[];
+}
+
+export interface ProcessHistory {
+	timestamps: number[];
+	name: string;
+	cpu_pct: number[];
+	mem_rss: number[];
+}
+
+export interface ContainerHistory {
+	timestamps: number[];
+	container_id: string;
+	name: string;
+	cpu_pct: number[];
+	mem_used: number[];
+	net_rx: number[];
+	net_tx: number[];
+}
+
+export interface HostConfigFilters {
+	nic_allow?: string[];
+	nic_deny?: string[];
+	sensor_allow?: string[];
+	sensor_deny?: string[];
+	mount_allow?: string[];
+	mount_deny?: string[];
+	container_deny?: string[];
+	service_patterns?: string[];
+	smart_devices?: string[];
+}
+
+export interface HostConfig {
+	host_id: string;
+	sample_interval_s: number;
+	enabled_families: string[];
+	family_intervals: Record<string, number>;
+	filters: HostConfigFilters;
+	mem_calc: 'used' | 'avail';
+	retention_days: number;
+	retention_overrides: Record<string, number>;
+	primary_sensor: string;
+	primary_mount: string;
+	warn_cpu: number;  crit_cpu: number;
+	warn_mem: number;  crit_mem: number;
+	warn_disk: number; crit_disk: number;
+	warn_temp: number; crit_temp: number;
+	updated_at: string;
+}
+
+export interface MonitoringBundle {
+	host: Host;
+	latest: MetricSample | null;
+	config: HostConfig;
+	history: {
+		metrics?: MetricSample[];
+		net?: NetIfaceHistory;
+		mounts?: DiskMountHistory;
+		diskio?: DiskIOHistory;
+		temps?: TempHistory;
+		cpuCores?: CPUCoreHistory;
+	};
+	openAlerts: AlertEvent[];
+}
+
+export interface MonitoringCatalogFamily {
+	key: string;
+	label: string;
+	experimental?: boolean;
+}
+
+export interface MonitoringCatalogTemplate {
+	name: string;
+	description: string;
+	rules: Array<{
+		metric: string;
+		op: string;
+		threshold: number;
+		duration_s: number;
+		severity: string;
+	}>;
+}
+
+export interface MonitoringCatalog {
+	families: MonitoringCatalogFamily[];
+	scalarMetrics: string[];
+	alertCategories: Record<string, string[]>;
+	alertOps: string[];
+	templates: MonitoringCatalogTemplate[];
+}
+
+// SSE v2 envelope (web/src/lib/stores/hosts.svelte.ts consumes this).
+// Older "metric" events stay backwards-compatible: clients that ignore .type
+// still see flat cpu/mem/netIn/netOut/temp fields under the default type.
+export type SSEEnvelopeType = 'metric' | 'host_status' | 'container_summary' | 'alert';
+
+export interface SSEMetricPayload {
+	type: 'metric';
+	hostId: string;
+	ts: number;
+	cpu: number;
+	mem: number;
+	netIn: number;
+	netOut: number;
+	temp: number;
+	diskPct: number;
+}
+
+export interface SSEHostStatusPayload {
+	type: 'host_status';
+	hostId: string;
+	ts: number;
+	status: HostStatus;
+}
+
+export interface SSEContainerSummaryPayload {
+	type: 'container_summary';
+	hostId: string;
+	ts: number;
+	containers: ContainerCounts;
+}
+
+export interface SSEAlertPayload {
+	type: 'alert';
+	hostId: string;
+	ts: number;
+	alert: {
+		ruleId: number;
+		eventId: number;
+		severity: 'info' | 'warning' | 'critical';
+		metric: string;
+		value: number;
+		resolved: boolean;
+	};
+}
+
+export type SSEEnvelope = SSEMetricPayload | SSEHostStatusPayload | SSEContainerSummaryPayload | SSEAlertPayload;
