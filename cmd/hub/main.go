@@ -110,6 +110,18 @@ func main() {
 
 	agentH := hub.NewAgentHandler(h, st, log)
 
+	// Wire the agent handler as the hub's config pusher for remote agents,
+	// and the local collector as the applier for the hub's own host_id.
+	// This lets PUT /api/hosts/{id}/config route updates to the right place
+	// without the API layer needing to know whether the host is local or remote.
+	h.SetConfigPusher(agentH)
+	h.SetLocalApplier(local, hostID)
+	// Apply the persisted host_config (if any) at startup so per-host policy
+	// survives hub restarts. Best-effort.
+	if err := h.PushConfigToAgent(ctx, hostID); err != nil {
+		log.Warn("initial local config push", "host_id", hostID, "err", err)
+	}
+
 	var webFS fs.FS
 	if *webDir != "" {
 		if _, err := os.Stat(*webDir); err != nil {

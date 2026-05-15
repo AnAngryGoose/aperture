@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,15 +81,63 @@ type TerminalProvider interface {
 	CloseTerminal(ctx context.Context, reqID string) error
 }
 
-// SSEEvent is the payload pushed to SSE subscribers on each metric sample.
+// SSEEvent is the typed envelope pushed to SSE subscribers. The Type field
+// disambiguates between event categories — older clients that don't read
+// Type still see the flat metric fields (cpu, mem, netIn, netOut, temp) under
+// the default "metric" type, preserving wire compatibility. Newer clients
+// switch on Type to handle host_status / container_summary / alert events.
+//
+// Event types:
+//   - "metric":            CPU + Mem + NetIn + NetOut + Temp + DiskPct flat fields
+//   - "host_status":       Status field ("ok" | "warn" | "crit" | "offline")
+//   - "container_summary": Containers nested struct
+//   - "alert":             Alert nested struct (rule_id, event_id, severity, fired/resolved, value)
 type SSEEvent struct {
-	HostID string  `json:"hostId"`
-	CPU    float64 `json:"cpu"`
-	Mem    float64 `json:"mem"`
-	NetIn  uint64  `json:"netIn"`
-	NetOut uint64  `json:"netOut"`
-	Temp   float64 `json:"temp"`
-	Ts     int64   `json:"ts"`
+	Type   string `json:"type"` // default: "metric"
+	HostID string `json:"hostId"`
+	Ts     int64  `json:"ts"`
+
+	// Metric payload (Type == "metric"). NOT omitempty — a host at exactly 0%
+	// CPU/mem must still emit "cpu":0 so the frontend updates. These fields
+	// are technically meaningless for other event types; subscribers ignore
+	// them based on Type. Backwards-compat wire shape with pre-v0.5 clients.
+	CPU     float64 `json:"cpu"`
+	Mem     float64 `json:"mem"`
+	NetIn   uint64  `json:"netIn"`
+	NetOut  uint64  `json:"netOut"`
+	Temp    float64 `json:"temp"`
+	DiskPct float64 `json:"diskPct"`
+
+	// host_status payload.
+	Status string `json:"status,omitempty"`
+
+	// container_summary payload.
+	Containers *ContainerCounts `json:"containers,omitempty"`
+
+	// alert payload.
+	Alert *AlertEnvelope `json:"alert,omitempty"`
+}
+
+// ContainerCounts is the per-host container summary the dashboard shows on
+// each card. Populated by either the hub-side ticker (local hosts) or the
+// remote agent and broadcast as "container_summary" events on change.
+type ContainerCounts struct {
+	Running   int `json:"running"`
+	Stopped   int `json:"stopped"`
+	Unhealthy int `json:"unhealthy"`
+	Total     int `json:"total"`
+}
+
+// AlertEnvelope is the SSE payload for fired/resolved alert state changes.
+// The full event details remain available via /api/alerts/events; this
+// envelope just nudges connected clients to refresh or show a toast.
+type AlertEnvelope struct {
+	RuleID   int64   `json:"ruleId"`
+	EventID  int64   `json:"eventId"`
+	Severity string  `json:"severity"` // "info" | "warning" | "critical"
+	Metric   string  `json:"metric"`
+	Value    float64 `json:"value"`
+	Resolved bool    `json:"resolved"`
 }
 
 type Hub struct {
@@ -105,9 +154,25 @@ type Hub struct {
 	// live-only rich fields (per-core CPU, per-interface net, disk mounts, etc.)
 	// that are NOT stored in the metrics table.
 	latestRich map[string]types.MetricSample
+	// latestContainerCounts is the per-host container summary read by the
+	// monitoring overview endpoint and broadcast as container_summary SSE
+	// events on change. Populated by a hub-side ticker for local hosts and
+	// by the agent for remote hosts. Guarded by mu.
+	latestContainerCounts map[string]ContainerCounts
+	// latestStatus is the per-host health status. Computed in ingestLoop from
+	// host_config thresholds + sample, broadcast as host_status SSE events on
+	// transition. Sources moved out of the client so all clients agree.
+	latestStatus map[string]string
 	// evaluator is set by SetEvaluator before Run is called. The interface
 	// type avoids an import cycle with internal/alerts.
 	evaluator Evaluator
+	// configPusher routes per-host config changes to a remote agent.
+	// Set by cmd/hub to the agent handler. Nil = no agent transport configured.
+	configPusher ConfigPusher
+	// localApplier mirrors per-host config changes to the in-process local
+	// collector when the changed host is the hub's own. Nil = no local source.
+	localApplier      LocalApplier
+	localApplierHosts map[string]bool // hostIDs whose config should be applied locally
 	// sseMu guards sseSubscribers.
 	sseMu          sync.Mutex
 	sseSubscribers map[string]chan SSEEvent // subscriber-id -> channel
@@ -118,6 +183,21 @@ type Hub struct {
 // substitute a stub.
 type Evaluator interface {
 	Evaluate(ctx context.Context, sample types.MetricSample)
+}
+
+// ConfigPusher pushes a per-host monitoring config to a remote agent over
+// the agent transport. AgentHandler satisfies this; the hub uses it to
+// notify a connected agent that its policy changed (on host_config PUT or
+// agent reconnect).
+type ConfigPusher interface {
+	PushConfig(ctx context.Context, hostID string, cfg types.HostConfig) error
+}
+
+// LocalApplier applies a config to the in-process local collector. The hub
+// uses it to keep the local collector in sync when host_config for the
+// hub's own host changes. *collector.Local satisfies this.
+type LocalApplier interface {
+	ApplyConfig(cfg types.HostConfig)
 }
 
 type Config struct {
@@ -131,17 +211,69 @@ func New(cfg Config) *Hub {
 		cfg.Logger = slog.Default()
 	}
 	return &Hub{
-		store:          cfg.Store,
-		log:            cfg.Logger,
-		retain:         cfg.Retain,
-		dockers:        make(map[string]DockerProvider),
-		composes:       make(map[string]ComposeProvider),
-		terminals:      make(map[string]TerminalProvider),
-		hosts:          make(map[string]types.Host),
-		samples:        make(chan types.MetricSample, 256),
-		latestRich:     make(map[string]types.MetricSample),
-		sseSubscribers: make(map[string]chan SSEEvent),
+		store:                 cfg.Store,
+		log:                   cfg.Logger,
+		retain:                cfg.Retain,
+		dockers:               make(map[string]DockerProvider),
+		composes:              make(map[string]ComposeProvider),
+		terminals:             make(map[string]TerminalProvider),
+		hosts:                 make(map[string]types.Host),
+		samples:               make(chan types.MetricSample, 256),
+		latestRich:            make(map[string]types.MetricSample),
+		latestContainerCounts: make(map[string]ContainerCounts),
+		latestStatus:          make(map[string]string),
+		sseSubscribers:        make(map[string]chan SSEEvent),
+		localApplierHosts:     make(map[string]bool),
 	}
+}
+
+// SetConfigPusher installs the agent config pusher. Called by cmd/hub after
+// constructing the agent handler. Nil-safe — PushConfigToAgent becomes a no-op
+// for remote hosts when the pusher isn't set.
+func (h *Hub) SetConfigPusher(p ConfigPusher) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.configPusher = p
+}
+
+// SetLocalApplier installs the in-process collector that should receive
+// config updates for the hub's own host(s). Call after RegisterSource for
+// each local host so the hub knows which host ID maps to the local collector.
+func (h *Hub) SetLocalApplier(a LocalApplier, hostIDs ...string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.localApplier = a
+	for _, id := range hostIDs {
+		h.localApplierHosts[id] = true
+	}
+}
+
+// PushConfigToAgent applies a per-host monitoring config to the right
+// transport. Reads the current config from store, then:
+//   - For hosts the localApplier owns: calls ApplyConfig directly.
+//   - For remote hosts with a registered configPusher: sends a ConfigFrame.
+//   - Otherwise: silent no-op (host might be offline).
+//
+// Returns an error only when the transport call itself fails; missing
+// transport/applier is treated as success.
+func (h *Hub) PushConfigToAgent(ctx context.Context, hostID string) error {
+	cfg, err := h.store.GetHostConfig(ctx, hostID)
+	if err != nil {
+		return fmt.Errorf("get config: %w", err)
+	}
+	h.mu.RLock()
+	isLocal := h.localApplierHosts[hostID]
+	applier := h.localApplier
+	pusher := h.configPusher
+	h.mu.RUnlock()
+	if isLocal && applier != nil {
+		applier.ApplyConfig(cfg)
+		return nil
+	}
+	if pusher != nil {
+		return pusher.PushConfig(ctx, hostID, cfg)
+	}
+	return nil
 }
 
 // SubscribeSSE registers a channel to receive live metric events. Returns
@@ -172,7 +304,8 @@ func (h *Hub) broadcastSSE(ev SSEEvent) {
 	}
 }
 
-// Run starts background workers: ingestion, retention. Returns when ctx is done.
+// Run starts background workers: ingestion, retention, container-summary.
+// Returns when ctx is done.
 func (h *Hub) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -180,13 +313,21 @@ func (h *Hub) Run(ctx context.Context) error {
 		defer wg.Done()
 		h.ingestLoop(ctx)
 	}()
-	if h.retain > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			h.retentionLoop(ctx)
-		}()
-	}
+	// Retention loop always runs (handles per-host policies even when the
+	// hub-wide default h.retain is 0).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h.retentionLoop(ctx)
+	}()
+	// Container summary loop: polls each registered docker provider on a
+	// slow interval and broadcasts container_summary SSE events on change.
+	// Eliminates the dashboard's per-poll Docker round-trips.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h.containerSummaryLoop(ctx)
+	}()
 	<-ctx.Done()
 	wg.Wait()
 	return nil
@@ -207,7 +348,11 @@ func (h *Hub) ingestLoop(ctx context.Context) {
 				h.log.Error("insert metric", "host_id", s.HostID, "err", err)
 				continue
 			}
-			// Best-effort: rich table failures don't abort the ingest loop.
+			// Best-effort persists: failures don't abort the ingest loop and
+			// each table is independent (a disk-mount write failure doesn't
+			// poison network or temp history). Slices are empty for families
+			// disabled by host_config (the collector skips them), so a
+			// len() > 0 gate is enough — no explicit family check here.
 			if len(s.NetIfaces) > 0 {
 				if err := h.store.InsertNetIfaces(ctx, s); err != nil {
 					h.log.Warn("insert net ifaces", "host_id", s.HostID, "err", err)
@@ -223,11 +368,27 @@ func (h *Hub) ingestLoop(ctx context.Context) {
 					h.log.Warn("insert disk io", "host_id", s.HostID, "err", err)
 				}
 			}
+			if len(s.Temps) > 0 {
+				if err := h.store.InsertTemps(ctx, s); err != nil {
+					h.log.Warn("insert temps", "host_id", s.HostID, "err", err)
+				}
+			}
+			if len(s.CPUPerCore) > 0 {
+				if err := h.store.InsertCPUCores(ctx, s); err != nil {
+					h.log.Warn("insert cpu cores", "host_id", s.HostID, "err", err)
+				}
+			}
+			if len(s.Processes) > 0 {
+				if err := h.store.InsertProcessSnapshot(ctx, s); err != nil {
+					h.log.Warn("insert processes", "host_id", s.HostID, "err", err)
+				}
+			}
 			_ = h.store.TouchHost(ctx, s.HostID, s.Timestamp)
 			if h.evaluator != nil {
 				h.evaluator.Evaluate(ctx, s)
 			}
-			// Broadcast lightweight SSE event to all connected browser clients.
+
+			// Derive average temperature for SSE payload (cards show "the" temp).
 			var avgTemp float64
 			if len(s.Temps) > 0 {
 				for _, t := range s.Temps {
@@ -235,17 +396,57 @@ func (h *Hub) ingestLoop(ctx context.Context) {
 				}
 				avgTemp /= float64(len(s.Temps))
 			}
+
+			// Broadcast metric event (backwards-compatible flat shape).
 			h.broadcastSSE(SSEEvent{
-				HostID: s.HostID,
-				CPU:    s.CPUPercent,
-				Mem:    s.MemPercent,
-				NetIn:  s.NetRxBytes,
-				NetOut: s.NetTxBytes,
-				Temp:   avgTemp,
-				Ts:     s.Timestamp.Unix(),
+				Type:    "metric",
+				HostID:  s.HostID,
+				Ts:      s.Timestamp.Unix(),
+				CPU:     s.CPUPercent,
+				Mem:     s.MemPercent,
+				NetIn:   s.NetRxBytes,
+				NetOut:  s.NetTxBytes,
+				Temp:    avgTemp,
+				DiskPct: s.DiskPercent,
 			})
+
+			// Compute host status from per-host config thresholds (or global
+			// defaults if no host_config row exists). Broadcast status only
+			// on transition — saves SSE bandwidth and avoids client churn.
+			newStatus := h.computeStatus(ctx, s, avgTemp)
+			h.mu.Lock()
+			prevStatus := h.latestStatus[s.HostID]
+			h.latestStatus[s.HostID] = newStatus
+			h.mu.Unlock()
+			if newStatus != prevStatus {
+				h.broadcastSSE(SSEEvent{
+					Type:   "host_status",
+					HostID: s.HostID,
+					Ts:     s.Timestamp.Unix(),
+					Status: newStatus,
+				})
+			}
 		}
 	}
+}
+
+// computeStatus returns the per-host status string ("ok"|"warn"|"crit"|"offline")
+// from the host's configured thresholds. Read from host_config or defaults.
+// Falls back gracefully if the config read fails — never panics on a
+// transient DB error during ingest.
+func (h *Hub) computeStatus(ctx context.Context, s types.MetricSample, maxTemp float64) string {
+	cfg, err := h.store.GetHostConfig(ctx, s.HostID)
+	if err != nil {
+		// Defaults are reasonable; don't fail the broadcast.
+		cfg = store.DefaultHostConfig(s.HostID)
+	}
+	if s.CPUPercent >= cfg.CritCPU || s.MemPercent >= cfg.CritMem || s.DiskPercent >= cfg.CritDisk || (maxTemp > 0 && maxTemp >= cfg.CritTemp) {
+		return "crit"
+	}
+	if s.CPUPercent >= cfg.WarnCPU || s.MemPercent >= cfg.WarnMem || s.DiskPercent >= cfg.WarnDisk || (maxTemp > 0 && maxTemp >= cfg.WarnTemp) {
+		return "warn"
+	}
+	return "ok"
 }
 
 // SetEvaluator installs the alert evaluator. Must be called before Run for
@@ -256,6 +457,10 @@ func (h *Hub) SetEvaluator(e Evaluator) {
 	h.evaluator = e
 }
 
+// retentionLoop runs hourly. For each host it computes per-table cutoffs
+// from the host's config (retention_days + retention_overrides) and prunes
+// scoped to that host. Hosts without a host_config row use h.retain (the
+// hub-wide default flag) or fall back to 30 days.
 func (h *Hub) retentionLoop(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
@@ -264,12 +469,148 @@ func (h *Hub) retentionLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			cutoff := time.Now().UTC().Add(-h.retain)
-			if n, err := h.store.PruneMetrics(ctx, cutoff); err == nil && n > 0 {
-				h.log.Info("pruned metrics", "rows", n, "cutoff", cutoff)
-			}
+			h.pruneAllHosts(ctx)
 		}
 	}
+}
+
+// pruneAllHosts iterates every host and prunes its metric tables according
+// to its host_config retention policy. Errors are logged per host so a single
+// failing host doesn't stop the others. Returns rows deleted across all
+// hosts (also logged at the loop level).
+func (h *Hub) pruneAllHosts(ctx context.Context) int64 {
+	hosts, err := h.store.ListHosts(ctx)
+	if err != nil {
+		h.log.Warn("retention: list hosts", "err", err)
+		return 0
+	}
+	now := time.Now().UTC()
+	var total int64
+	for _, host := range hosts {
+		cfg, err := h.store.GetHostConfig(ctx, host.ID)
+		if err != nil {
+			h.log.Warn("retention: get config", "host_id", host.ID, "err", err)
+			continue
+		}
+		// Default retention for tables not in retention_overrides.
+		defaultDays := cfg.RetentionDays
+		if defaultDays <= 0 {
+			if h.retain > 0 {
+				defaultDays = int(h.retain.Hours() / 24)
+			} else {
+				defaultDays = 30
+			}
+		}
+		tables := []string{"metrics", "net_iface_metrics", "disk_mount_metrics", "disk_io_metrics",
+			"temp_metrics", "cpu_core_metrics", "process_metrics", "container_metrics"}
+		cutoffs := make(map[string]time.Time, len(tables))
+		for _, table := range tables {
+			days := defaultDays
+			if d, ok := cfg.RetentionOverrides[table]; ok && d > 0 {
+				days = d
+			}
+			cutoffs[table] = now.AddDate(0, 0, -days)
+		}
+		n, err := h.store.PruneHostMetrics(ctx, host.ID, cutoffs)
+		if err != nil {
+			h.log.Warn("retention: prune", "host_id", host.ID, "err", err)
+			continue
+		}
+		total += n
+	}
+	if total > 0 {
+		h.log.Info("retention: pruned", "rows", total)
+	}
+	return total
+}
+
+// containerSummaryLoop polls every registered docker provider every 15
+// seconds, computes running/stopped/unhealthy counts, and broadcasts a
+// container_summary SSE event when the counts change. This replaces the
+// dashboard's previous per-poll Docker round-trips: one hub-side call
+// services all connected clients.
+func (h *Hub) containerSummaryLoop(ctx context.Context) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	// Tick once immediately so we have counts before the first 15s window.
+	h.refreshAllContainerCounts(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			h.refreshAllContainerCounts(ctx)
+		}
+	}
+}
+
+// refreshAllContainerCounts iterates every registered docker provider and
+// updates the latestContainerCounts map, broadcasting on change.
+func (h *Hub) refreshAllContainerCounts(ctx context.Context) {
+	h.mu.RLock()
+	providers := make(map[string]DockerProvider, len(h.dockers))
+	for id, p := range h.dockers {
+		providers[id] = p
+	}
+	h.mu.RUnlock()
+
+	for hostID, p := range providers {
+		list, err := p.List(ctx, true)
+		if err != nil {
+			continue
+		}
+		var counts ContainerCounts
+		counts.Total = len(list)
+		for _, c := range list {
+			switch c.State {
+			case "running":
+				counts.Running++
+			default:
+				counts.Stopped++
+			}
+			if strings.Contains(strings.ToLower(c.Status), "unhealthy") {
+				counts.Unhealthy++
+			}
+		}
+		h.SetContainerCounts(hostID, counts)
+	}
+}
+
+// SetContainerCounts updates the cached counts for a host and broadcasts a
+// container_summary SSE event when the counts changed. Public so remote
+// agent transports can push their container summary on a different cadence.
+func (h *Hub) SetContainerCounts(hostID string, counts ContainerCounts) {
+	h.mu.Lock()
+	prev, hadPrev := h.latestContainerCounts[hostID]
+	h.latestContainerCounts[hostID] = counts
+	h.mu.Unlock()
+	if hadPrev && prev == counts {
+		return
+	}
+	h.broadcastSSE(SSEEvent{
+		Type:       "container_summary",
+		HostID:     hostID,
+		Ts:         time.Now().Unix(),
+		Containers: &counts,
+	})
+}
+
+// ContainerCounts returns the cached per-host container summary. Used by the
+// monitoring overview endpoint so the dashboard gets counts in one call
+// without fanning out a per-host Docker request.
+func (h *Hub) ContainerCounts(hostID string) (ContainerCounts, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	c, ok := h.latestContainerCounts[hostID]
+	return c, ok
+}
+
+// LatestStatus returns the cached per-host status string. Used by the
+// monitoring overview endpoint.
+func (h *Hub) LatestStatus(hostID string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.latestStatus[hostID]
 }
 
 // RegisterSource attaches a metric source for a host. Returns the host_id the

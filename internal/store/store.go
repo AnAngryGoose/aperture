@@ -1110,12 +1110,7 @@ func (s *Store) UpsertHostConfig(ctx context.Context, cfg types.HostConfig) erro
 func (s *Store) PruneMetricsPerTable(ctx context.Context, cutoffs map[string]time.Time) (int64, error) {
 	var total int64
 	for table, cutoff := range cutoffs {
-		// Defensive: only allow the metric tables we know about. Prevents a
-		// future bug from letting an arbitrary table name slip into a DELETE.
-		switch table {
-		case "metrics", "net_iface_metrics", "disk_mount_metrics", "disk_io_metrics",
-			"temp_metrics", "cpu_core_metrics", "process_metrics", "container_metrics":
-		default:
+		if !isMetricTable(table) {
 			continue
 		}
 		res, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE ts < ?`, cutoff)
@@ -1126,6 +1121,36 @@ func (s *Store) PruneMetricsPerTable(ctx context.Context, cutoffs map[string]tim
 		total += n
 	}
 	return total, nil
+}
+
+// PruneHostMetrics deletes rows older than the per-table cutoff scoped to one
+// host. Used by the per-host retention loop so host A's 7-day temp retention
+// doesn't have to wait for host B's 30-day retention to expire.
+func (s *Store) PruneHostMetrics(ctx context.Context, hostID string, cutoffs map[string]time.Time) (int64, error) {
+	var total int64
+	for table, cutoff := range cutoffs {
+		if !isMetricTable(table) {
+			continue
+		}
+		res, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE host_id = ? AND ts < ?`, hostID, cutoff)
+		if err != nil {
+			return total, fmt.Errorf("prune host %s table %s: %w", hostID, table, err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
+// isMetricTable allow-lists the metric tables that prune may touch. Prevents
+// a future bug from injecting an arbitrary table name into a DELETE.
+func isMetricTable(table string) bool {
+	switch table {
+	case "metrics", "net_iface_metrics", "disk_mount_metrics", "disk_io_metrics",
+		"temp_metrics", "cpu_core_metrics", "process_metrics", "container_metrics":
+		return true
+	}
+	return false
 }
 
 // --- alert rules ---

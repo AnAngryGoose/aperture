@@ -50,10 +50,28 @@ type Local struct {
 	// expensive syscall whose result barely changes between ticks; cache it
 	// with a short TTL and only re-query disk.UsageWithContext per cached
 	// mount each tick.
-	mountListMu     sync.Mutex
-	mountList       []disk.PartitionStat
-	mountListAt     time.Time
-	mountListTTL    time.Duration
+	mountListMu  sync.Mutex
+	mountList    []disk.PartitionStat
+	mountListAt  time.Time
+	mountListTTL time.Duration
+
+	// Configurable family enablement + filters. Default is "all on, no
+	// filters" matching pre-config behavior; ApplyConfig swaps in a host_config.
+	// Reads happen on every sample() call; mutex protects swap during writes.
+	cfgMu      sync.RWMutex
+	enabledSet map[string]bool // nil = all enabled (default)
+	filters    types.HostConfigFilters
+	memCalc    string // "used" (default) | "avail"
+}
+
+// AllFamilies is the canonical list of families inlined in Local.sample().
+// Used as the default when no host_config rows exists. Kept here (not in
+// host_config.go) so adding/removing a family in this file is a one-line
+// change. The optional families (smart, gpu, battery, systemd) live in the
+// families/ subpackage and are not represented here.
+var AllFamilies = []string{
+	"cpu", "mem", "disk", "net", "load", "uptime",
+	"temps", "processes", "cpu_per_core", "disk_io", "mounts",
 }
 
 type netPrev struct{ rx, tx uint64 }
@@ -78,7 +96,50 @@ func NewLocal(interval time.Duration) *Local {
 		prevDiskIO:   make(map[string]diskPrev),
 		procCache:    make(map[int32]*gopsprocess.Process),
 		mountListTTL: 30 * time.Second,
+		// enabledSet=nil means "all families enabled" — pre-config default.
 	}
+}
+
+// ApplyConfig swaps in a per-host monitoring policy. Safe to call at any
+// time (including concurrently with sample()); the new config takes effect
+// on the next tick. Passing the zero value resets to "all families enabled".
+func (l *Local) ApplyConfig(cfg types.HostConfig) {
+	l.cfgMu.Lock()
+	defer l.cfgMu.Unlock()
+	if len(cfg.EnabledFamilies) == 0 {
+		l.enabledSet = nil
+	} else {
+		set := make(map[string]bool, len(cfg.EnabledFamilies))
+		for _, f := range cfg.EnabledFamilies {
+			set[f] = true
+		}
+		l.enabledSet = set
+	}
+	l.filters = cfg.Filters
+	l.memCalc = cfg.MemCalc
+	if cfg.SampleIntervalS > 0 {
+		l.Interval = time.Duration(cfg.SampleIntervalS) * time.Second
+	}
+}
+
+// familyEnabled reports whether the named family should run this tick.
+// Always-on when no config applied. Reads under RLock so sampling threads
+// can't starve a config push.
+func (l *Local) familyEnabled(name string) bool {
+	l.cfgMu.RLock()
+	defer l.cfgMu.RUnlock()
+	if l.enabledSet == nil {
+		return true
+	}
+	return l.enabledSet[name]
+}
+
+// getFilters returns the current filter set (a copy, so callers can iterate
+// without holding the lock).
+func (l *Local) getFilters() types.HostConfigFilters {
+	l.cfgMu.RLock()
+	defer l.cfgMu.RUnlock()
+	return l.filters
 }
 
 func (l *Local) HostInfo() types.HostInfo {
@@ -157,86 +218,103 @@ func (l *Local) sample(ctx context.Context) (types.MetricSample, error) {
 	s := types.MetricSample{Timestamp: now}
 
 	// --- Aggregate CPU (stored in DB) ---
-	if pcts, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pcts) > 0 {
-		s.CPUPercent = pcts[0]
-	}
-
-	// --- Per-core CPU (live only) ---
-	if pcts, err := cpu.PercentWithContext(ctx, 0, true); err == nil && len(pcts) > 0 {
-		s.CPUPerCore = pcts
-	}
-
-	// --- Memory ---
-	if v, err := mem.VirtualMemoryWithContext(ctx); err == nil {
-		s.MemUsed = v.Used
-		s.MemTotal = v.Total
-		s.MemPercent = v.UsedPercent
-		s.MemAvail = v.Available
-		s.MemCached = v.Cached
-	}
-	if sw, err := mem.SwapMemoryWithContext(ctx); err == nil {
-		s.SwapUsed = sw.Used
-		s.SwapTotal = sw.Total
-	}
-
-	// --- Disk usage for configured path (stored in DB) ---
-	path := l.DiskPath
-	if path == "" {
-		path = "/"
-	}
-	if du, err := disk.UsageWithContext(ctx, path); err == nil {
-		s.DiskUsed = du.Used
-		s.DiskTotal = du.Total
-		s.DiskPercent = du.UsedPercent
-	}
-
-	// --- All disk mounts (live only) ---
-	s.DiskMounts = l.diskMounts(ctx)
-
-	// --- Network aggregate (stored in DB) ---
-	if io, err := net.IOCountersWithContext(ctx, false); err == nil && len(io) > 0 {
-		s.NetRxBytes = io[0].BytesRecv
-		s.NetTxBytes = io[0].BytesSent
-	}
-
-	// --- Per-interface network (live only) ---
-	s.NetIfaces = l.netIfaces(ctx, dt)
-
-	// --- Disk I/O per device (live only) ---
-	s.DiskIO = l.diskIO(ctx, dt)
-
-	// --- Load average ---
-	if la, err := load.AvgWithContext(ctx); err == nil {
-		s.LoadAvg1 = la.Load1
-		s.LoadAvg5 = la.Load5
-		s.LoadAvg15 = la.Load15
-	}
-
-	// --- Uptime ---
-	if u, err := host.UptimeWithContext(ctx); err == nil {
-		s.UptimeSecs = u
-	}
-
-	// --- Temperature sensors (live only, optional) ---
-	if temps, err := sensors.TemperaturesWithContext(ctx); err == nil {
-		seen := make(map[string]bool)
-		for _, t := range temps {
-			if t.Temperature <= 0 {
-				continue
-			}
-			if seen[t.SensorKey] {
-				continue
-			}
-			seen[t.SensorKey] = true
-			s.Temps = append(s.Temps, types.TempSample{
-				Name: t.SensorKey,
-				Temp: t.Temperature,
-			})
+	if l.familyEnabled("cpu") {
+		if pcts, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pcts) > 0 {
+			s.CPUPercent = pcts[0]
 		}
 	}
 
-	// --- Process list (live only) ---
-	s.Processes = l.processes(ctx)
+	// --- Per-core CPU ---
+	if l.familyEnabled("cpu_per_core") {
+		if pcts, err := cpu.PercentWithContext(ctx, 0, true); err == nil && len(pcts) > 0 {
+			s.CPUPerCore = pcts
+		}
+	}
+
+	// --- Memory ---
+	if l.familyEnabled("mem") {
+		if v, err := mem.VirtualMemoryWithContext(ctx); err == nil {
+			s.MemTotal = v.Total
+			s.MemAvail = v.Available
+			s.MemCached = v.Cached
+			// Memory "used" can be computed two ways. Default ("used"):
+			// gopsutil's v.Used / v.UsedPercent (which is total - free - cached - buffers).
+			// "avail" mode: total - MemAvailable, which matches what htop and
+			// most modern tools show. Useful on hosts with heavy page cache
+			// where the default looks deceptively idle.
+			if l.getMemCalc() == "avail" && v.Available > 0 && v.Total > 0 {
+				s.MemUsed = v.Total - v.Available
+				s.MemPercent = float64(s.MemUsed) / float64(v.Total) * 100.0
+			} else {
+				s.MemUsed = v.Used
+				s.MemPercent = v.UsedPercent
+			}
+		}
+		if sw, err := mem.SwapMemoryWithContext(ctx); err == nil {
+			s.SwapUsed = sw.Used
+			s.SwapTotal = sw.Total
+		}
+	}
+
+	// --- Disk usage for configured path (stored in DB) ---
+	if l.familyEnabled("disk") {
+		path := l.DiskPath
+		if path == "" {
+			path = "/"
+		}
+		if du, err := disk.UsageWithContext(ctx, path); err == nil {
+			s.DiskUsed = du.Used
+			s.DiskTotal = du.Total
+			s.DiskPercent = du.UsedPercent
+		}
+	}
+
+	// --- All disk mounts (live + persisted history) ---
+	if l.familyEnabled("mounts") {
+		s.DiskMounts = l.diskMounts(ctx)
+	}
+
+	// --- Network aggregate ---
+	if l.familyEnabled("net") {
+		if io, err := net.IOCountersWithContext(ctx, false); err == nil && len(io) > 0 {
+			s.NetRxBytes = io[0].BytesRecv
+			s.NetTxBytes = io[0].BytesSent
+		}
+		// Per-interface lives under the same "net" family — they're collected
+		// together from gopsutil's IOCountersWithContext(true).
+		s.NetIfaces = l.netIfaces(ctx, dt)
+	}
+
+	// --- Disk I/O per device ---
+	if l.familyEnabled("disk_io") {
+		s.DiskIO = l.diskIO(ctx, dt)
+	}
+
+	// --- Load average ---
+	if l.familyEnabled("load") {
+		if la, err := load.AvgWithContext(ctx); err == nil {
+			s.LoadAvg1 = la.Load1
+			s.LoadAvg5 = la.Load5
+			s.LoadAvg15 = la.Load15
+		}
+	}
+
+	// --- Uptime ---
+	if l.familyEnabled("uptime") {
+		if u, err := host.UptimeWithContext(ctx); err == nil {
+			s.UptimeSecs = u
+		}
+	}
+
+	// --- Temperature sensors ---
+	if l.familyEnabled("temps") {
+		s.Temps = l.tempSensors(ctx)
+	}
+
+	// --- Process list ---
+	if l.familyEnabled("processes") {
+		s.Processes = l.processes(ctx)
+	}
 
 	l.prevTime = now
 	return s, nil
@@ -388,12 +466,13 @@ func topKByRSS(xs []types.ProcessSample, k int) []types.ProcessSample {
 // The partition list is cached (TTL = mountListTTL, default 30s) since the
 // set of mounts rarely changes between ticks and disk.PartitionsWithContext
 // is comparatively expensive. disk.UsageWithContext is still called fresh
-// per mount each tick.
+// per mount each tick. Mount allow/deny filters from host_config are applied.
 func (l *Local) diskMounts(ctx context.Context) []types.DiskMountSample {
 	parts, err := l.cachedPartitions(ctx)
 	if err != nil {
 		return nil
 	}
+	filters := l.getFilters()
 	seen := make(map[string]bool)
 	var out []types.DiskMountSample
 	for _, p := range parts {
@@ -411,6 +490,9 @@ func (l *Local) diskMounts(ctx context.Context) []types.DiskMountSample {
 			continue
 		}
 		if seen[p.Mountpoint] {
+			continue
+		}
+		if !allowName(p.Mountpoint, filters.MountAllow, filters.MountDeny) {
 			continue
 		}
 		seen[p.Mountpoint] = true
@@ -432,15 +514,21 @@ func (l *Local) diskMounts(ctx context.Context) []types.DiskMountSample {
 }
 
 // netIfaces returns per-interface cumulative byte counters and derived rates.
+// NIC allow/deny filters from host_config are applied on top of the
+// built-in (lo, veth*) exclusions.
 func (l *Local) netIfaces(ctx context.Context, dt float64) []types.NetInterfaceSample {
 	ifaces, err := net.IOCountersWithContext(ctx, true)
 	if err != nil {
 		return nil
 	}
+	filters := l.getFilters()
 	var out []types.NetInterfaceSample
 	for _, iface := range ifaces {
 		// Skip loopback and per-container virtual interfaces.
 		if iface.Name == "lo" || strings.HasPrefix(iface.Name, "veth") {
+			continue
+		}
+		if !allowName(iface.Name, filters.NICAllow, filters.NICDeny) {
 			continue
 		}
 		prev := l.prevNetIO[iface.Name]
@@ -501,6 +589,61 @@ func (l *Local) diskIO(ctx context.Context, dt float64) []types.DiskIOSample {
 		}
 	}
 	return out
+}
+
+// getMemCalc returns the configured memory-calculation mode (default "used").
+func (l *Local) getMemCalc() string {
+	l.cfgMu.RLock()
+	defer l.cfgMu.RUnlock()
+	return l.memCalc
+}
+
+// tempSensors collects temperature readings, applying sensor allow/deny
+// filters from the host_config. Duplicate sensor keys (gopsutil reports
+// some sensors twice on multi-socket systems) are de-duplicated, and zero
+// readings are skipped (gopsutil's "unavailable" marker).
+func (l *Local) tempSensors(ctx context.Context) []types.TempSample {
+	raw, err := sensors.TemperaturesWithContext(ctx)
+	if err != nil {
+		return nil
+	}
+	filters := l.getFilters()
+	seen := make(map[string]bool)
+	var out []types.TempSample
+	for _, t := range raw {
+		if t.Temperature <= 0 {
+			continue
+		}
+		if seen[t.SensorKey] {
+			continue
+		}
+		if !allowName(t.SensorKey, filters.SensorAllow, filters.SensorDeny) {
+			continue
+		}
+		seen[t.SensorKey] = true
+		out = append(out, types.TempSample{Name: t.SensorKey, Temp: t.Temperature})
+	}
+	return out
+}
+
+// allowName applies allow/deny semantics: deny wins over allow; an empty
+// allow list means "all allowed (subject to deny)". Used by every filter
+// (NIC, sensor, mount, container).
+func allowName(name string, allow, deny []string) bool {
+	for _, d := range deny {
+		if d == name {
+			return false
+		}
+	}
+	if len(allow) == 0 {
+		return true
+	}
+	for _, a := range allow {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }
 
 // cachedPartitions returns disk.PartitionStat list, using a short-TTL cache to

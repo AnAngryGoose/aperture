@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aperture/aperture/internal/agentproto"
 	"github.com/aperture/aperture/internal/store"
 	"github.com/aperture/aperture/internal/types"
 	"github.com/coder/websocket"
@@ -158,6 +159,31 @@ func (ah *AgentHandler) ConnectedAgents() []string {
 	return out
 }
 
+// PushConfig sends a TypeConfig frame to a connected agent. Implements
+// hub.ConfigPusher so the hub can route host_config updates to remote agents
+// uniformly. No-op when the agent isn't currently connected.
+func (ah *AgentHandler) PushConfig(ctx context.Context, hostID string, cfg types.HostConfig) error {
+	ah.mu.RLock()
+	sess, ok := ah.sessions[hostID]
+	ah.mu.RUnlock()
+	if !ok {
+		// Agent not connected — config will be applied on the next reconnect
+		// via the post-ack push in ServeHTTP.
+		return nil
+	}
+	frame := agentproto.ConfigFrame{
+		Type:            agentproto.TypeConfig,
+		SampleIntervalS: cfg.SampleIntervalS,
+		EnabledFamilies: cfg.EnabledFamilies,
+		Filters:         cfg.Filters,
+		MemCalc:         cfg.MemCalc,
+	}
+	// Serialize writes per session — wsjson is not goroutine-safe.
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return wsjson.Write(ctx, sess.conn, frame)
+}
+
 // ServeHTTP handles the WebSocket upgrade for agent connections.
 func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Extract and verify bearer token.
@@ -270,6 +296,12 @@ func (ah *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ack := ackFrame{Type: "ack", HostID: hostID}
 	if err := wsjson.Write(r.Context(), conn, ack); err != nil {
 		ah.log.Warn("write ack failed", "host_id", hostID, "err", err)
+	}
+
+	// 7b. Push initial monitoring config so the agent applies per-host policy
+	// from the start. Falls back to defaults if no host_config row exists.
+	if err := ah.hub.PushConfigToAgent(r.Context(), hostID); err != nil {
+		ah.log.Warn("push initial config", "host_id", hostID, "err", err)
 	}
 
 	ah.log.Info("agent connected", "host_id", hostID, "name", hello.Host.Name, "version", hello.Version)

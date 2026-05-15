@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -260,17 +261,37 @@ func (e *Evaluator) HandleRuleDelete(ruleID int64) {
 	e.Invalidate()
 }
 
-// SupportedMetrics is the canonical list of metric names rules can target.
-// Kept here (rather than in types) because it's evaluator-specific; the API
-// uses it for validation.
+// SupportedMetrics is the canonical list of *scalar* metric names rules can
+// target. Dotted-target metrics (iface.<n>.rx_rate, mount.<p>.pct, etc.) are
+// validated by category/suffix in ValidateRule below rather than enumerated
+// here, since their full set depends on what the host is currently reporting.
+// The API exposes this list (plus per-category suffixes) via /api/alerts/metadata
+// so the rule-editor dropdown stays in sync without a second source of truth.
 var SupportedMetrics = []string{
 	"cpu_pct", "mem_pct", "disk_pct", "swap_pct",
 	"load_1", "load_5", "load_15",
+	"temp.max", // shorthand: hottest sensor on the host
 }
 
-// MetricValue extracts the named metric from a sample. Returns false on an
-// unknown name so the evaluator can warn instead of fire spuriously.
+// MetricCategories declares the dotted-target families and the leaf suffixes
+// each supports. Frontend uses this to drive the two-step picker
+// (category → target → leaf).
+var MetricCategories = map[string][]string{
+	"iface":     {"rx_rate", "tx_rate", "rx_bytes", "tx_bytes"},
+	"mount":     {"pct", "used", "total"},
+	"temp":      {"value"},
+	"proc":      {"cpu_pct", "mem_pct", "mem_rss"},
+	"container": {"cpu_pct", "mem_pct", "mem_used", "restart_count"}, // evaluated by the container-metric path; see container_metric_evaluator (future)
+	"host":      {"status"},                                          // evaluated on host_status SSE transitions (future)
+}
+
+// MetricValue extracts the named metric from a sample. Supports both flat
+// names ("cpu_pct", "mem_pct", ...) and dotted target syntax
+// ("iface.eth0.rx_rate", "mount./var.pct", "temp.cpu_thermal.value",
+// "proc.nginx.cpu_pct", "temp.max"). Returns (0, false) on an unknown name or
+// a target that isn't present in the sample.
 func MetricValue(s types.MetricSample, metric string) (float64, bool) {
+	// Fast path: flat scalars.
 	switch metric {
 	case "cpu_pct":
 		return s.CPUPercent, true
@@ -289,13 +310,111 @@ func MetricValue(s types.MetricSample, metric string) (float64, bool) {
 		return s.LoadAvg5, true
 	case "load_15":
 		return s.LoadAvg15, true
+	case "temp.max":
+		var max float64
+		for _, t := range s.Temps {
+			if t.Temp > max {
+				max = t.Temp
+			}
+		}
+		return max, len(s.Temps) > 0
+	}
+
+	// Dotted targets: <category>.<name>.<leaf>. Use SplitN so target names
+	// containing dots (e.g. mount path "/var/log") work for the simple case
+	// where the path has no nested dots — for more complex names we use the
+	// last segment as the leaf and the rest as the name.
+	parts := strings.SplitN(metric, ".", 2)
+	if len(parts) != 2 {
+		return 0, false
+	}
+	category, rest := parts[0], parts[1]
+	// Split rest into <name>.<leaf> using the LAST dot so names with dots
+	// survive (interface names like "br-1234" don't have dots; mount paths
+	// like "/var/log" don't either, but to be safe we use rfind).
+	dot := strings.LastIndex(rest, ".")
+	if dot < 0 {
+		return 0, false
+	}
+	name, leaf := rest[:dot], rest[dot+1:]
+
+	switch category {
+	case "iface":
+		for _, ifc := range s.NetIfaces {
+			if ifc.Name != name {
+				continue
+			}
+			switch leaf {
+			case "rx_rate":
+				return ifc.RxRate, true
+			case "tx_rate":
+				return ifc.TxRate, true
+			case "rx_bytes":
+				return float64(ifc.RxBytes), true
+			case "tx_bytes":
+				return float64(ifc.TxBytes), true
+			}
+		}
+	case "mount":
+		for _, m := range s.DiskMounts {
+			if m.Mount != name {
+				continue
+			}
+			switch leaf {
+			case "pct":
+				return m.Percent, true
+			case "used":
+				return float64(m.Used), true
+			case "total":
+				return float64(m.Total), true
+			}
+		}
+	case "temp":
+		for _, t := range s.Temps {
+			if t.Name != name {
+				continue
+			}
+			if leaf == "value" {
+				return t.Temp, true
+			}
+		}
+	case "proc":
+		// Multiple processes can share a name (nginx workers, chrome tabs).
+		// Use the max value across all matches — typical alerting intent for
+		// "is anything called nginx hot?" is the worst offender.
+		var max float64
+		found := false
+		for _, p := range s.Processes {
+			if p.Name != name {
+				continue
+			}
+			found = true
+			var v float64
+			switch leaf {
+			case "cpu_pct":
+				v = p.CPUPct
+			case "mem_pct":
+				v = p.MemPct
+			case "mem_rss":
+				v = float64(p.MemRSS)
+			default:
+				continue
+			}
+			if v > max {
+				max = v
+			}
+		}
+		if found {
+			return max, true
+		}
 	}
 	return 0, false
 }
 
-// SupportedOps is the canonical comparison-operator list. Used for API
-// validation so rule configs can't slip through with invalid operators.
-var SupportedOps = []string{">", ">=", "<", "<="}
+// SupportedOps is the canonical comparison-operator list. Numeric ops
+// (>, >=, <, <=) apply to all metrics. String ops (==, !=) apply only to
+// metrics that resolve to a string value (host.status, container.<n>.state).
+var SupportedOps = []string{">", ">=", "<", "<=", "==", "!="}
 
 func compare(v float64, op string, threshold float64) bool {
 	switch op {
@@ -307,18 +426,20 @@ func compare(v float64, op string, threshold float64) bool {
 		return v < threshold
 	case "<=":
 		return v <= threshold
+	case "==":
+		return v == threshold
+	case "!=":
+		return v != threshold
 	}
 	return false
 }
 
-// ValidateRule checks a rule's metric/op fields against the canonical lists.
-// Centralized so create and update share validation logic.
+// ValidateRule checks a rule's metric/op fields. Flat names must be in
+// SupportedMetrics; dotted-target names must have a known category and a
+// known leaf for that category.
 func ValidateRule(r types.AlertRule) error {
 	if r.Metric == "" {
 		return errors.New("metric is required")
-	}
-	if !contains(SupportedMetrics, r.Metric) {
-		return fmt.Errorf("unsupported metric %q (allowed: %v)", r.Metric, SupportedMetrics)
 	}
 	if !contains(SupportedOps, r.Op) {
 		return fmt.Errorf("unsupported op %q (allowed: %v)", r.Op, SupportedOps)
@@ -326,7 +447,36 @@ func ValidateRule(r types.AlertRule) error {
 	if r.DurationS < 0 {
 		return errors.New("duration_s must be >= 0")
 	}
+	if contains(SupportedMetrics, r.Metric) {
+		return nil
+	}
+	// Dotted target: <category>.<name>.<leaf>.
+	parts := strings.SplitN(r.Metric, ".", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("unsupported metric %q", r.Metric)
+	}
+	category, rest := parts[0], parts[1]
+	leafSet, ok := MetricCategories[category]
+	if !ok {
+		return fmt.Errorf("unsupported metric category %q (allowed: %v)", category, categoryKeys())
+	}
+	dot := strings.LastIndex(rest, ".")
+	if dot < 0 {
+		return fmt.Errorf("metric %q missing leaf suffix; expected %s.<name>.<leaf>", r.Metric, category)
+	}
+	leaf := rest[dot+1:]
+	if !contains(leafSet, leaf) {
+		return fmt.Errorf("unsupported leaf %q for category %q (allowed: %v)", leaf, category, leafSet)
+	}
 	return nil
+}
+
+func categoryKeys() []string {
+	out := make([]string, 0, len(MetricCategories))
+	for k := range MetricCategories {
+		out = append(out, k)
+	}
+	return out
 }
 
 func contains(xs []string, x string) bool {

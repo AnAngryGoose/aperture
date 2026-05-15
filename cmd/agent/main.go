@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aperture/aperture/internal/agentproto"
 	"github.com/aperture/aperture/internal/collector"
 	"github.com/aperture/aperture/internal/compose"
 	"github.com/aperture/aperture/internal/dockerctl"
@@ -378,6 +379,23 @@ func runSession(
 				continue
 			}
 			go handleTerminalData(ctx, req)
+		case "config":
+			// Hub pushed an updated monitoring policy for this host. Apply
+			// to the local collector — takes effect on the next tick.
+			var cf agentproto.ConfigFrame
+			if err := json.Unmarshal(msg, &cf); err != nil {
+				log.Warn("decode config frame", "err", err)
+				continue
+			}
+			col.ApplyConfig(types.HostConfig{
+				SampleIntervalS: cf.SampleIntervalS,
+				EnabledFamilies: cf.EnabledFamilies,
+				Filters:         cf.Filters,
+				MemCalc:         cf.MemCalc,
+			})
+			log.Info("applied config from hub",
+				"interval_s", cf.SampleIntervalS,
+				"families", cf.EnabledFamilies)
 		}
 	}
 }

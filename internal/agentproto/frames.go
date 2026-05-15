@@ -18,6 +18,10 @@ const (
 	TypeTerminalReq  = "terminal_req"
 	TypeTerminalResp = "terminal_resp"
 	TypeTerminalData = "terminal_data"
+	// TypeConfig pushes per-host monitoring policy (sample interval, enabled
+	// families, filters, mem_calc) from hub to agent. Sent on every
+	// host_config PUT and once at agent connect after the hello/ack exchange.
+	TypeConfig = "config"
 )
 
 type Frame struct {
@@ -104,4 +108,15 @@ type TerminalDataFrame struct {
 	Type  string `json:"type"`
 	ReqID string `json:"req_id"`
 	Data  []byte `json:"data"`
+}
+
+// ConfigFrame pushes a per-host monitoring policy from hub to agent.
+// Mirrors types.HostConfig but only the fields the agent acts on (numeric
+// thresholds are evaluated server-side by the hub, not by the agent).
+type ConfigFrame struct {
+	Type            string                  `json:"type"`
+	SampleIntervalS int                     `json:"sample_interval_s"`
+	EnabledFamilies []string                `json:"enabled_families"`
+	Filters         types.HostConfigFilters `json:"filters"`
+	MemCalc         string                  `json:"mem_calc"`
 }
