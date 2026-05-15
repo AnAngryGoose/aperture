@@ -164,6 +164,28 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 
 			// SSE live metrics stream.
 			r.Get("/stream/metrics", s.streamMetrics)
+
+			// Monitoring spine (Compartment 2): aggregated endpoints the
+			// v0.5 frontend uses as its primary data source. Single calls
+			// replace the prior N+1 fan-out from the dashboard and the
+			// 7-call fan-out from the host detail page.
+			r.Get("/monitoring/overview", s.monitoringOverview)
+			r.Get("/monitoring/catalog", s.monitoringCatalog)
+			r.Get("/hosts/{id}/monitoring/bundle", s.monitoringBundle)
+
+			// Per-host monitoring config (sample interval, enabled families,
+			// filters, thresholds, retention). PUT pushes the change to the
+			// running collector/agent so it takes effect on the next tick.
+			r.Get("/hosts/{id}/config", s.getHostConfig)
+			r.Put("/hosts/{id}/config", s.putHostConfig)
+
+			// Per-metric history endpoints unlocked by the new schema in C1.
+			// Bundle returns these inline, but the host-detail page also uses
+			// them for single-chart drill-ins (e.g. clicking one process).
+			r.Get("/hosts/{id}/metrics/temps", s.tempHistory)
+			r.Get("/hosts/{id}/metrics/cpu", s.cpuCoreHistory)
+			r.Get("/hosts/{id}/metrics/procs", s.procHistory)
+			r.Get("/hosts/{id}/containers/{cid}/metrics", s.containerHistory)
 		})
 	})
 
@@ -1042,10 +1064,11 @@ func (s *Server) checkImageUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) alertsMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"metrics":       alerts.SupportedMetrics,
-		"ops":           alerts.SupportedOps,
-		"severities":    []string{"info", "warning", "critical"},
-		"channel_types": []string{"discord", "slack", "ntfy", "gotify", "webhook"},
+		"metrics":        alerts.SupportedMetrics,
+		"ops":            alerts.SupportedOps,
+		"categories":     alerts.MetricCategories, // dotted-target families and their leaves
+		"severities":     []string{"info", "warning", "critical"},
+		"channel_types":  []string{"discord", "slack", "ntfy", "gotify", "webhook", "shoutrrr"},
 	})
 }
 
