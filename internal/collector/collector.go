@@ -7,11 +7,11 @@
 package collector
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"os"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +45,15 @@ type Local struct {
 	// time since last call rather than since object creation.
 	procMu    sync.Mutex
 	procCache map[int32]*gopsprocess.Process
+
+	// Mount partition cache. disk.PartitionsWithContext is a comparatively
+	// expensive syscall whose result barely changes between ticks; cache it
+	// with a short TTL and only re-query disk.UsageWithContext per cached
+	// mount each tick.
+	mountListMu     sync.Mutex
+	mountList       []disk.PartitionStat
+	mountListAt     time.Time
+	mountListTTL    time.Duration
 }
 
 type netPrev struct{ rx, tx uint64 }
@@ -63,11 +72,12 @@ var pseudoFS = map[string]bool{
 
 func NewLocal(interval time.Duration) *Local {
 	return &Local{
-		Interval:   interval,
-		DiskPath:   "/",
-		prevNetIO:  make(map[string]netPrev),
-		prevDiskIO: make(map[string]diskPrev),
-		procCache:  make(map[int32]*gopsprocess.Process),
+		Interval:     interval,
+		DiskPath:     "/",
+		prevNetIO:    make(map[string]netPrev),
+		prevDiskIO:   make(map[string]diskPrev),
+		procCache:    make(map[int32]*gopsprocess.Process),
+		mountListTTL: 30 * time.Second,
 	}
 }
 
@@ -289,27 +299,21 @@ func (l *Local) processes(ctx context.Context) []types.ProcessSample {
 		})
 	}
 
-	// Union of top N by CPU and top N by RSS.
-	byCPU := append([]types.ProcessSample(nil), all...)
-	sort.Slice(byCPU, func(i, j int) bool { return byCPU[i].CPUPct > byCPU[j].CPUPct })
-	byMem := append([]types.ProcessSample(nil), all...)
-	sort.Slice(byMem, func(i, j int) bool { return byMem[i].MemRSS > byMem[j].MemRSS })
+	// Union of top-K by CPU and top-K by RSS, using min-heaps so we are
+	// O(N log K) per axis rather than O(N log N) full sorts. With K=20 this
+	// is meaningful on hosts with many processes.
+	topCPU := topKByCPU(all, maxTopProc)
+	topMem := topKByRSS(all, maxTopProc)
 
-	seen := make(map[int32]bool)
-	var result []types.ProcessSample
-	for _, s := range byCPU {
-		if len(result) >= maxTopProc {
-			break
-		}
+	seen := make(map[int32]bool, maxTopProc*2)
+	result := make([]types.ProcessSample, 0, maxTopProc*2)
+	for _, s := range topCPU {
 		if !seen[s.PID] {
 			seen[s.PID] = true
 			result = append(result, s)
 		}
 	}
-	for _, s := range byMem {
-		if len(result) >= maxTopProc*2 {
-			break
-		}
+	for _, s := range topMem {
 		if !seen[s.PID] {
 			seen[s.PID] = true
 			result = append(result, s)
@@ -318,9 +322,75 @@ func (l *Local) processes(ctx context.Context) []types.ProcessSample {
 	return result
 }
 
+// procCPUHeap is a min-heap on CPUPct: heap[0] is the lowest-CPU element so
+// we can cheaply evict when the heap grows past K and keep only the top-K.
+type procCPUHeap []types.ProcessSample
+
+func (h procCPUHeap) Len() int            { return len(h) }
+func (h procCPUHeap) Less(i, j int) bool  { return h[i].CPUPct < h[j].CPUPct }
+func (h procCPUHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *procCPUHeap) Push(x any)         { *h = append(*h, x.(types.ProcessSample)) }
+func (h *procCPUHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+
+type procRSSHeap []types.ProcessSample
+
+func (h procRSSHeap) Len() int           { return len(h) }
+func (h procRSSHeap) Less(i, j int) bool { return h[i].MemRSS < h[j].MemRSS }
+func (h procRSSHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *procRSSHeap) Push(x any)        { *h = append(*h, x.(types.ProcessSample)) }
+func (h *procRSSHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+
+// topKByCPU returns the top-k entries by CPUPct in descending order.
+func topKByCPU(xs []types.ProcessSample, k int) []types.ProcessSample {
+	if k <= 0 || len(xs) == 0 {
+		return nil
+	}
+	h := &procCPUHeap{}
+	heap.Init(h)
+	for _, x := range xs {
+		if h.Len() < k {
+			heap.Push(h, x)
+		} else if x.CPUPct > (*h)[0].CPUPct {
+			(*h)[0] = x
+			heap.Fix(h, 0)
+		}
+	}
+	out := make([]types.ProcessSample, h.Len())
+	for i := len(out) - 1; i >= 0; i-- {
+		out[i] = heap.Pop(h).(types.ProcessSample)
+	}
+	return out
+}
+
+// topKByRSS returns the top-k entries by MemRSS in descending order.
+func topKByRSS(xs []types.ProcessSample, k int) []types.ProcessSample {
+	if k <= 0 || len(xs) == 0 {
+		return nil
+	}
+	h := &procRSSHeap{}
+	heap.Init(h)
+	for _, x := range xs {
+		if h.Len() < k {
+			heap.Push(h, x)
+		} else if x.MemRSS > (*h)[0].MemRSS {
+			(*h)[0] = x
+			heap.Fix(h, 0)
+		}
+	}
+	out := make([]types.ProcessSample, h.Len())
+	for i := len(out) - 1; i >= 0; i-- {
+		out[i] = heap.Pop(h).(types.ProcessSample)
+	}
+	return out
+}
+
 // diskMounts returns real (non-pseudo) mounted filesystems with their usage.
+// The partition list is cached (TTL = mountListTTL, default 30s) since the
+// set of mounts rarely changes between ticks and disk.PartitionsWithContext
+// is comparatively expensive. disk.UsageWithContext is still called fresh
+// per mount each tick.
 func (l *Local) diskMounts(ctx context.Context) []types.DiskMountSample {
-	parts, err := disk.PartitionsWithContext(ctx, true) // all=true to catch NFS etc.
+	parts, err := l.cachedPartitions(ctx)
 	if err != nil {
 		return nil
 	}
@@ -431,4 +501,23 @@ func (l *Local) diskIO(ctx context.Context, dt float64) []types.DiskIOSample {
 		}
 	}
 	return out
+}
+
+// cachedPartitions returns disk.PartitionStat list, using a short-TTL cache to
+// avoid the comparatively expensive disk.PartitionsWithContext syscall on
+// every sample. Mount points rarely change between ticks; usage is still
+// re-queried per call.
+func (l *Local) cachedPartitions(ctx context.Context) ([]disk.PartitionStat, error) {
+	l.mountListMu.Lock()
+	defer l.mountListMu.Unlock()
+	if l.mountList != nil && time.Since(l.mountListAt) < l.mountListTTL {
+		return l.mountList, nil
+	}
+	parts, err := disk.PartitionsWithContext(ctx, true) // all=true to catch NFS etc.
+	if err != nil {
+		return nil, err
+	}
+	l.mountList = parts
+	l.mountListAt = time.Now()
+	return parts, nil
 }

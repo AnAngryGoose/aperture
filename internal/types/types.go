@@ -171,6 +171,102 @@ type DiskIOHistory struct {
 	Devices    map[string]*DiskIOSeries   `json:"devices"`
 }
 
+// TempHistory is the response shape for GET /api/hosts/{id}/metrics/temps.
+// Same pivot pattern as NetIfaceHistory — timestamps shared across all sensors,
+// sensors map keyed by sensor name returning the celsius series.
+type TempHistory struct {
+	Timestamps []int64              `json:"timestamps"`
+	Sensors    map[string][]float64 `json:"sensors"`
+}
+
+// CPUCoreHistory is the response shape for GET /api/hosts/{id}/metrics/cpu.
+// Cores indexed by core number (sparse so a host with cores 0,1,4,5 will
+// return only those keys).
+type CPUCoreHistory struct {
+	Timestamps []int64           `json:"timestamps"`
+	Cores      map[int][]float64 `json:"cores"`
+	// Aggregate CPU% over the same timestamps — convenience so the UI can draw
+	// the overall line alongside per-core series without a second request.
+	Aggregate  []float64         `json:"aggregate"`
+}
+
+// ProcessHistory is the response shape for GET /api/hosts/{id}/metrics/procs?name=X.
+// Tracks one process by name (PID churns so name is the stable key).
+type ProcessHistory struct {
+	Timestamps []int64   `json:"timestamps"`
+	Name       string    `json:"name"`
+	CPUPct     []float64 `json:"cpu_pct"`
+	MemRSS     []uint64  `json:"mem_rss"`
+}
+
+// ContainerHistory is the response shape for
+// GET /api/hosts/{id}/containers/{cid}/metrics. Per-container time series.
+type ContainerHistory struct {
+	Timestamps []int64   `json:"timestamps"`
+	ContainerID string   `json:"container_id"`
+	Name       string    `json:"name"`
+	CPUPct     []float64 `json:"cpu_pct"`
+	MemUsed    []uint64  `json:"mem_used"`
+	NetRx      []uint64  `json:"net_rx"`
+	NetTx      []uint64  `json:"net_tx"`
+}
+
+// HostConfig is the per-host monitoring policy. Absent rows fall back to the
+// global defaults in user_settings['monitoring.defaults']. List- and
+// map-typed fields are stored as JSON in SQLite so adding a new family or
+// filter doesn't require a schema migration.
+type HostConfig struct {
+	HostID             string             `json:"host_id"`
+	SampleIntervalS    int                `json:"sample_interval_s"`
+	EnabledFamilies    []string           `json:"enabled_families"`
+	FamilyIntervals    map[string]int     `json:"family_intervals"`
+	Filters            HostConfigFilters  `json:"filters"`
+	MemCalc            string             `json:"mem_calc"` // "used" | "avail"
+	RetentionDays      int                `json:"retention_days"`
+	RetentionOverrides map[string]int     `json:"retention_overrides"`
+	PrimarySensor      string             `json:"primary_sensor"`
+	PrimaryMount       string             `json:"primary_mount"`
+	WarnCPU            float64            `json:"warn_cpu"`
+	CritCPU            float64            `json:"crit_cpu"`
+	WarnMem            float64            `json:"warn_mem"`
+	CritMem            float64            `json:"crit_mem"`
+	WarnDisk           float64            `json:"warn_disk"`
+	CritDisk           float64            `json:"crit_disk"`
+	WarnTemp           float64            `json:"warn_temp"`
+	CritTemp           float64            `json:"crit_temp"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+}
+
+// HostConfigFilters is the structured shape of the filters JSON blob.
+// Adding a new filter type means adding a field here and (optionally) a UI
+// control — no schema migration required.
+type HostConfigFilters struct {
+	NICAllow         []string `json:"nic_allow,omitempty"`
+	NICDeny          []string `json:"nic_deny,omitempty"`
+	SensorAllow      []string `json:"sensor_allow,omitempty"`
+	SensorDeny       []string `json:"sensor_deny,omitempty"`
+	MountAllow       []string `json:"mount_allow,omitempty"`
+	MountDeny        []string `json:"mount_deny,omitempty"`
+	ContainerDeny    []string `json:"container_deny,omitempty"`    // exact or wildcard names
+	ServicePatterns  []string `json:"service_patterns,omitempty"`  // for systemd family
+	SMARTDevices     []string `json:"smart_devices,omitempty"`     // for smart family
+}
+
+// ContainerMetricSample is one tick of per-container stats persisted to
+// container_metrics. Mirrors the Container struct's live-stat fields.
+type ContainerMetricSample struct {
+	HostID      string    `json:"host_id"`
+	Timestamp   time.Time `json:"timestamp"`
+	ContainerID string    `json:"container_id"`
+	Name        string    `json:"name"`
+	State       string    `json:"state"`
+	CPUPct      float64   `json:"cpu_pct"`
+	MemUsed     uint64    `json:"mem_used"`
+	MemLimit    uint64    `json:"mem_limit"`
+	NetRx       uint64    `json:"net_rx"`
+	NetTx       uint64    `json:"net_tx"`
+}
+
 // Container is a docker container observed on a host.
 type Container struct {
 	HostID     string            `json:"host_id"`

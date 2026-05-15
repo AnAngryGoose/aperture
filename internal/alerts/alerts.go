@@ -49,6 +49,14 @@ type Evaluator struct {
 	// Loaded from the DB on construction so a hub restart can resolve events
 	// that were open at shutdown.
 	open map[ruleHostKey]types.AlertEvent
+
+	// rulesCache holds all enabled rules in memory so Evaluate doesn't hit
+	// SQLite on every ingest. Filtered by host_id at evaluation time (a small
+	// in-memory filter beats a DB roundtrip per sample). Invalidate() must be
+	// called after any rule mutation (create/update/delete) by the API layer.
+	rulesMu       sync.RWMutex
+	rulesCache    []types.AlertRule
+	rulesCacheOK  bool
 }
 
 // SetNotifier wires in a Notifier so fired/resolved events are dispatched to
@@ -88,7 +96,7 @@ func New(ctx context.Context, st *store.Store, log *slog.Logger) (*Evaluator, er
 // any state transitions. It is safe to call concurrently with itself for
 // different hosts; the internal mutex keeps the open/pending maps consistent.
 func (e *Evaluator) Evaluate(ctx context.Context, sample types.MetricSample) {
-	rules, err := e.store.ListEnabledRulesFor(ctx, sample.HostID)
+	rules, err := e.rulesFor(ctx, sample.HostID)
 	if err != nil {
 		e.log.Error("alerts: list rules", "host_id", sample.HostID, "err", err)
 		return
@@ -96,6 +104,62 @@ func (e *Evaluator) Evaluate(ctx context.Context, sample types.MetricSample) {
 	for _, r := range rules {
 		e.evalOne(ctx, r, sample)
 	}
+}
+
+// rulesFor returns enabled rules applicable to hostID, reading from the
+// in-memory cache (loading lazily on first call or after invalidation).
+func (e *Evaluator) rulesFor(ctx context.Context, hostID string) ([]types.AlertRule, error) {
+	e.rulesMu.RLock()
+	if e.rulesCacheOK {
+		out := filterRulesForHost(e.rulesCache, hostID)
+		e.rulesMu.RUnlock()
+		return out, nil
+	}
+	e.rulesMu.RUnlock()
+
+	// Upgrade to write lock to populate.
+	e.rulesMu.Lock()
+	defer e.rulesMu.Unlock()
+	if e.rulesCacheOK {
+		return filterRulesForHost(e.rulesCache, hostID), nil
+	}
+	// Pull ALL enabled rules once; per-host filter happens in-memory below.
+	// We use ListAlertRules(nil) and filter by enabled to get a single global list.
+	all, err := e.store.ListAlertRules(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]types.AlertRule, 0, len(all))
+	for _, r := range all {
+		if r.Enabled {
+			enabled = append(enabled, r)
+		}
+	}
+	e.rulesCache = enabled
+	e.rulesCacheOK = true
+	return filterRulesForHost(e.rulesCache, hostID), nil
+}
+
+// filterRulesForHost returns the rules from `all` that apply to hostID:
+// rules with a nil host_id (global) or with host_id == hostID (host-specific).
+func filterRulesForHost(all []types.AlertRule, hostID string) []types.AlertRule {
+	out := make([]types.AlertRule, 0, len(all))
+	for _, r := range all {
+		if r.HostID == nil || *r.HostID == hostID {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Invalidate clears the in-memory rules cache. The API layer must call this
+// after any rule create / update / delete so the next Evaluate reloads the
+// fresh rule set from SQLite.
+func (e *Evaluator) Invalidate() {
+	e.rulesMu.Lock()
+	e.rulesCache = nil
+	e.rulesCacheOK = false
+	e.rulesMu.Unlock()
 }
 
 func (e *Evaluator) evalOne(ctx context.Context, r types.AlertRule, sample types.MetricSample) {
@@ -178,10 +242,10 @@ func (e *Evaluator) fire(ctx context.Context, r types.AlertRule, sample types.Me
 
 // HandleRuleDelete drops any in-memory state for a rule that's been deleted.
 // Call from the API layer after a successful DELETE so we don't keep stale
-// open/pending entries that can never resolve.
+// open/pending entries that can never resolve. Also invalidates the rules
+// cache so the next Evaluate reloads.
 func (e *Evaluator) HandleRuleDelete(ruleID int64) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	for k := range e.pending {
 		if k.ruleID == ruleID {
 			delete(e.pending, k)
@@ -192,6 +256,8 @@ func (e *Evaluator) HandleRuleDelete(ruleID int64) {
 			delete(e.open, k)
 		}
 	}
+	e.mu.Unlock()
+	e.Invalidate()
 }
 
 // SupportedMetrics is the canonical list of metric names rules can target.

@@ -1117,6 +1117,9 @@ func (s *Server) createAlertRule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	if s.evaluator != nil {
+		s.evaluator.Invalidate()
+	}
 	// Read back so created_at (DB default) is populated in the response.
 	created, err := s.hub.Store().GetAlertRule(r.Context(), id)
 	if err != nil || created == nil {
@@ -1164,6 +1167,9 @@ func (s *Server) updateAlertRule(w http.ResponseWriter, r *http.Request) {
 	if err := s.hub.Store().UpdateAlertRule(r.Context(), rule); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	if s.evaluator != nil {
+		s.evaluator.Invalidate()
 	}
 	updated, err := s.hub.Store().GetAlertRule(r.Context(), id)
 	if err != nil || updated == nil {

@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Hot-path index for the evaluator's per-sample rule lookup:
+-- WHERE enabled = 1 AND (host_id IS NULL OR host_id = ?).
+CREATE INDEX IF NOT EXISTS idx_alert_rules_eval ON alert_rules(enabled, host_id);
+
 CREATE TABLE IF NOT EXISTS alert_channels (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     name           TEXT NOT NULL,
@@ -157,5 +161,87 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS user_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
+);
+
+-- ---------------------------------------------------------------------------
+-- Rich monitoring history. The legacy `metrics` table holds aggregate scalar
+-- fields per host per tick. The following tables persist the *high-cardinality*
+-- live-only fields (temps, per-core CPU, process top-N, container stats) so
+-- the UI can chart history for each, not just the latest snapshot.
+-- Each is keyed by (host_id, ts, <element>) so duplicate-timestamp ingests
+-- from a misbehaving source are silently rejected at the PK layer.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS temp_metrics (
+    host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ts      TIMESTAMP NOT NULL,
+    sensor  TEXT NOT NULL,
+    temp_c  REAL NOT NULL,
+    PRIMARY KEY (host_id, ts, sensor)
+);
+CREATE INDEX IF NOT EXISTS idx_temp_metrics_host_ts ON temp_metrics(host_id, ts DESC);
+
+CREATE TABLE IF NOT EXISTS cpu_core_metrics (
+    host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ts      TIMESTAMP NOT NULL,
+    core    INTEGER NOT NULL,
+    pct     REAL NOT NULL,
+    PRIMARY KEY (host_id, ts, core)
+);
+CREATE INDEX IF NOT EXISTS idx_cpu_core_metrics_host_ts ON cpu_core_metrics(host_id, ts DESC);
+
+-- Process history is queried by name (PIDs churn so the index leads with name).
+CREATE TABLE IF NOT EXISTS process_metrics (
+    host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ts      TIMESTAMP NOT NULL,
+    pid     INTEGER NOT NULL,
+    name    TEXT NOT NULL,
+    cpu_pct REAL NOT NULL,
+    mem_rss INTEGER NOT NULL,
+    PRIMARY KEY (host_id, ts, pid)
+);
+CREATE INDEX IF NOT EXISTS idx_process_metrics_host_name_ts ON process_metrics(host_id, name, ts DESC);
+
+CREATE TABLE IF NOT EXISTS container_metrics (
+    host_id      TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    ts           TIMESTAMP NOT NULL,
+    container_id TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    state        TEXT NOT NULL,
+    cpu_pct      REAL NOT NULL,
+    mem_used     INTEGER NOT NULL,
+    mem_limit    INTEGER NOT NULL,
+    net_rx       INTEGER NOT NULL,
+    net_tx       INTEGER NOT NULL,
+    PRIMARY KEY (host_id, ts, container_id)
+);
+CREATE INDEX IF NOT EXISTS idx_container_metrics_host_ts ON container_metrics(host_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_container_metrics_lookup ON container_metrics(host_id, container_id, ts DESC);
+
+-- Per-host monitoring configuration. Absent row = use the global defaults
+-- stored in user_settings under 'monitoring.defaults'. Stored as JSON for the
+-- list-typed and map-typed fields (enabled_families, family_intervals,
+-- filters, retention_overrides) so adding a new family or filter doesn't
+-- require a schema migration.
+CREATE TABLE IF NOT EXISTS host_config (
+    host_id              TEXT PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE,
+    sample_interval_s    INTEGER NOT NULL DEFAULT 5,
+    enabled_families     TEXT NOT NULL DEFAULT '["cpu","mem","disk","net","load","temps","processes","cpu_per_core","disk_io","mounts","containers"]',
+    family_intervals     TEXT NOT NULL DEFAULT '{}',
+    filters              TEXT NOT NULL DEFAULT '{}',
+    mem_calc             TEXT NOT NULL DEFAULT 'used',
+    retention_days       INTEGER NOT NULL DEFAULT 30,
+    retention_overrides  TEXT NOT NULL DEFAULT '{}',
+    primary_sensor       TEXT NOT NULL DEFAULT '',
+    primary_mount        TEXT NOT NULL DEFAULT '',
+    warn_cpu             REAL NOT NULL DEFAULT 70,
+    crit_cpu             REAL NOT NULL DEFAULT 90,
+    warn_mem             REAL NOT NULL DEFAULT 80,
+    crit_mem             REAL NOT NULL DEFAULT 90,
+    warn_disk            REAL NOT NULL DEFAULT 80,
+    crit_disk            REAL NOT NULL DEFAULT 90,
+    warn_temp            REAL NOT NULL DEFAULT 70,
+    crit_temp            REAL NOT NULL DEFAULT 85,
+    updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

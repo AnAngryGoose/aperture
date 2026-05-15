@@ -604,6 +604,530 @@ func (s *Store) DiskIORange(ctx context.Context, hostID string, since, until tim
 	return out, nil
 }
 
+// --- rich monitoring history: inserts ---
+
+// InsertTemps bulk-inserts per-sensor temperature readings from a sample.
+// Best-effort: errors are logged by the caller and don't abort ingest.
+func (s *Store) InsertTemps(ctx context.Context, m types.MetricSample) error {
+	if len(m.Temps) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO temp_metrics (host_id, ts, sensor, temp_c)
+		VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, t := range m.Temps {
+		if _, err := stmt.ExecContext(ctx, m.HostID, m.Timestamp, t.Name, t.Temp); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// InsertCPUCores bulk-inserts per-core CPU percentages from a sample.
+func (s *Store) InsertCPUCores(ctx context.Context, m types.MetricSample) error {
+	if len(m.CPUPerCore) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO cpu_core_metrics (host_id, ts, core, pct)
+		VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i, pct := range m.CPUPerCore {
+		if _, err := stmt.ExecContext(ctx, m.HostID, m.Timestamp, i, pct); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// InsertProcessSnapshot bulk-inserts the top-N process list from a sample.
+func (s *Store) InsertProcessSnapshot(ctx context.Context, m types.MetricSample) error {
+	if len(m.Processes) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO process_metrics (host_id, ts, pid, name, cpu_pct, mem_rss)
+		VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, p := range m.Processes {
+		if _, err := stmt.ExecContext(ctx, m.HostID, m.Timestamp, p.PID, p.Name, p.CPUPct, p.MemRSS); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// InsertContainerMetrics bulk-inserts per-container stats from a single tick.
+// Separate from the metric-sample path because container stats can be
+// collected on a different cadence than the host sample (the agent fetches
+// docker stats on its own cycle).
+func (s *Store) InsertContainerMetrics(ctx context.Context, samples []types.ContainerMetricSample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO container_metrics
+			(host_id, ts, container_id, name, state, cpu_pct, mem_used, mem_limit, net_rx, net_tx)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, c := range samples {
+		if _, err := stmt.ExecContext(ctx,
+			c.HostID, c.Timestamp, c.ContainerID, c.Name, c.State,
+			c.CPUPct, c.MemUsed, c.MemLimit, c.NetRx, c.NetTx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// --- rich monitoring history: ranges ---
+
+// stridePicks returns a sorted list of timestamps from `all` downsampled to
+// at most maxPoints entries (uniform stride; the last timestamp is always
+// kept so charts align to the right edge of the range).
+func stridePicks(all []time.Time, maxPoints int) ([]time.Time, map[time.Time]bool) {
+	sort.Slice(all, func(i, j int) bool { return all[i].Before(all[j]) })
+	stride := 1
+	if maxPoints > 0 && len(all) > maxPoints {
+		stride = len(all) / maxPoints
+	}
+	kept := make(map[time.Time]bool, len(all))
+	for i := 0; i < len(all); i += stride {
+		kept[all[i]] = true
+	}
+	if len(all) > 0 {
+		kept[all[len(all)-1]] = true
+	}
+	out := make([]time.Time, 0, len(kept))
+	for _, t := range all {
+		if kept[t] {
+			out = append(out, t)
+		}
+	}
+	return out, kept
+}
+
+// TempRange returns per-sensor temperature readings for charting.
+func (s *Store) TempRange(ctx context.Context, hostID string, since, until time.Time, maxPoints int) (*types.TempHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ts, sensor, temp_c
+		FROM temp_metrics
+		WHERE host_id = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC, sensor ASC`, hostID, since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type tempRow struct {
+		ts     time.Time
+		sensor string
+		temp   float64
+	}
+	var all []tempRow
+	tsSeen := make(map[time.Time]bool)
+	for rows.Next() {
+		var r tempRow
+		if err := rows.Scan(&r.ts, &r.sensor, &r.temp); err != nil {
+			return nil, err
+		}
+		all = append(all, r)
+		tsSeen[r.ts] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	tsList := make([]time.Time, 0, len(tsSeen))
+	for t := range tsSeen {
+		tsList = append(tsList, t)
+	}
+	tsKept, kept := stridePicks(tsList, maxPoints)
+	tsIndex := make(map[time.Time]int, len(tsKept))
+	for i, t := range tsKept {
+		tsIndex[t] = i
+	}
+	out := &types.TempHistory{
+		Timestamps: make([]int64, 0, len(tsKept)),
+		Sensors:    map[string][]float64{},
+	}
+	for _, t := range tsKept {
+		out.Timestamps = append(out.Timestamps, t.Unix())
+	}
+	for _, r := range all {
+		if !kept[r.ts] {
+			continue
+		}
+		series, ok := out.Sensors[r.sensor]
+		if !ok {
+			series = make([]float64, len(tsKept))
+			out.Sensors[r.sensor] = series
+		}
+		series[tsIndex[r.ts]] = r.temp
+	}
+	return out, nil
+}
+
+// CPUCoreRange returns per-core CPU% plus the aggregate from the metrics table.
+// Aggregate comes from a parallel MetricsRange query (single source of truth for
+// the overall CPU% line).
+func (s *Store) CPUCoreRange(ctx context.Context, hostID string, since, until time.Time, maxPoints int) (*types.CPUCoreHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ts, core, pct
+		FROM cpu_core_metrics
+		WHERE host_id = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC, core ASC`, hostID, since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type coreRow struct {
+		ts   time.Time
+		core int
+		pct  float64
+	}
+	var all []coreRow
+	tsSeen := make(map[time.Time]bool)
+	for rows.Next() {
+		var r coreRow
+		if err := rows.Scan(&r.ts, &r.core, &r.pct); err != nil {
+			return nil, err
+		}
+		all = append(all, r)
+		tsSeen[r.ts] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	tsList := make([]time.Time, 0, len(tsSeen))
+	for t := range tsSeen {
+		tsList = append(tsList, t)
+	}
+	tsKept, kept := stridePicks(tsList, maxPoints)
+	tsIndex := make(map[time.Time]int, len(tsKept))
+	for i, t := range tsKept {
+		tsIndex[t] = i
+	}
+	out := &types.CPUCoreHistory{
+		Timestamps: make([]int64, 0, len(tsKept)),
+		Cores:      map[int][]float64{},
+		Aggregate:  make([]float64, len(tsKept)),
+	}
+	for _, t := range tsKept {
+		out.Timestamps = append(out.Timestamps, t.Unix())
+	}
+	for _, r := range all {
+		if !kept[r.ts] {
+			continue
+		}
+		series, ok := out.Cores[r.core]
+		if !ok {
+			series = make([]float64, len(tsKept))
+			out.Cores[r.core] = series
+		}
+		series[tsIndex[r.ts]] = r.pct
+	}
+	// Fill aggregate from the metrics table over the same kept timestamps.
+	aggRows, err := s.db.QueryContext(ctx, `
+		SELECT ts, cpu_pct FROM metrics
+		WHERE host_id = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC`, hostID, since, until)
+	if err == nil {
+		defer aggRows.Close()
+		for aggRows.Next() {
+			var ts time.Time
+			var pct float64
+			if err := aggRows.Scan(&ts, &pct); err == nil {
+				if i, ok := tsIndex[ts]; ok {
+					out.Aggregate[i] = pct
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// ProcessRange returns one process's CPU + RSS series, keyed by name (PIDs
+// churn so name is the stable axis for historical queries).
+func (s *Store) ProcessRange(ctx context.Context, hostID, name string, since, until time.Time, maxPoints int) (*types.ProcessHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ts, cpu_pct, mem_rss
+		FROM process_metrics
+		WHERE host_id = ? AND name = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC`, hostID, name, since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type pRow struct {
+		ts  time.Time
+		cpu float64
+		rss uint64
+	}
+	var all []pRow
+	for rows.Next() {
+		var r pRow
+		if err := rows.Scan(&r.ts, &r.cpu, &r.rss); err != nil {
+			return nil, err
+		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Same process can appear with different PIDs across reboots — group by
+	// timestamp and take the max (or first; first is fine since same-tick
+	// duplicates are PK-rejected).
+	tsList := make([]time.Time, 0, len(all))
+	for _, r := range all {
+		tsList = append(tsList, r.ts)
+	}
+	tsKept, kept := stridePicks(tsList, maxPoints)
+	tsIndex := make(map[time.Time]int, len(tsKept))
+	for i, t := range tsKept {
+		tsIndex[t] = i
+	}
+	out := &types.ProcessHistory{
+		Timestamps: make([]int64, 0, len(tsKept)),
+		Name:       name,
+		CPUPct:     make([]float64, len(tsKept)),
+		MemRSS:     make([]uint64, len(tsKept)),
+	}
+	for _, t := range tsKept {
+		out.Timestamps = append(out.Timestamps, t.Unix())
+	}
+	for _, r := range all {
+		if !kept[r.ts] {
+			continue
+		}
+		idx := tsIndex[r.ts]
+		if r.cpu > out.CPUPct[idx] {
+			out.CPUPct[idx] = r.cpu
+		}
+		if r.rss > out.MemRSS[idx] {
+			out.MemRSS[idx] = r.rss
+		}
+	}
+	return out, nil
+}
+
+// ContainerMetricRange returns one container's CPU/mem/net history.
+func (s *Store) ContainerMetricRange(ctx context.Context, hostID, containerID string, since, until time.Time, maxPoints int) (*types.ContainerHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ts, name, cpu_pct, mem_used, net_rx, net_tx
+		FROM container_metrics
+		WHERE host_id = ? AND container_id = ? AND ts >= ? AND ts <= ?
+		ORDER BY ts ASC`, hostID, containerID, since, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type cRow struct {
+		ts             time.Time
+		name           string
+		cpu            float64
+		mem            uint64
+		netRx, netTx   uint64
+	}
+	var all []cRow
+	for rows.Next() {
+		var r cRow
+		if err := rows.Scan(&r.ts, &r.name, &r.cpu, &r.mem, &r.netRx, &r.netTx); err != nil {
+			return nil, err
+		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	tsList := make([]time.Time, 0, len(all))
+	for _, r := range all {
+		tsList = append(tsList, r.ts)
+	}
+	tsKept, kept := stridePicks(tsList, maxPoints)
+	tsIndex := make(map[time.Time]int, len(tsKept))
+	for i, t := range tsKept {
+		tsIndex[t] = i
+	}
+	out := &types.ContainerHistory{
+		Timestamps:  make([]int64, 0, len(tsKept)),
+		ContainerID: containerID,
+		CPUPct:      make([]float64, len(tsKept)),
+		MemUsed:     make([]uint64, len(tsKept)),
+		NetRx:       make([]uint64, len(tsKept)),
+		NetTx:       make([]uint64, len(tsKept)),
+	}
+	for _, t := range tsKept {
+		out.Timestamps = append(out.Timestamps, t.Unix())
+	}
+	for _, r := range all {
+		if !kept[r.ts] {
+			continue
+		}
+		idx := tsIndex[r.ts]
+		out.Name = r.name
+		out.CPUPct[idx] = r.cpu
+		out.MemUsed[idx] = r.mem
+		out.NetRx[idx] = r.netRx
+		out.NetTx[idx] = r.netTx
+	}
+	return out, nil
+}
+
+// --- per-host monitoring config ---
+
+// DefaultHostConfig returns the built-in defaults used when a host has no
+// host_config row. Mirrors the column defaults in schema.sql so behavior
+// matches whether the row exists or not.
+func DefaultHostConfig(hostID string) types.HostConfig {
+	return types.HostConfig{
+		HostID:             hostID,
+		SampleIntervalS:    5,
+		EnabledFamilies:    []string{"cpu", "mem", "disk", "net", "load", "temps", "processes", "cpu_per_core", "disk_io", "mounts", "containers"},
+		FamilyIntervals:    map[string]int{},
+		Filters:            types.HostConfigFilters{},
+		MemCalc:            "used",
+		RetentionDays:      30,
+		RetentionOverrides: map[string]int{},
+		WarnCPU: 70, CritCPU: 90,
+		WarnMem: 80, CritMem: 90,
+		WarnDisk: 80, CritDisk: 90,
+		WarnTemp: 70, CritTemp: 85,
+	}
+}
+
+// GetHostConfig returns the per-host monitoring policy, or the built-in
+// defaults if no row exists for hostID. Never returns (nil, nil) — callers
+// always get a usable config.
+func (s *Store) GetHostConfig(ctx context.Context, hostID string) (types.HostConfig, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT sample_interval_s, enabled_families, family_intervals, filters, mem_calc,
+		       retention_days, retention_overrides, primary_sensor, primary_mount,
+		       warn_cpu, crit_cpu, warn_mem, crit_mem, warn_disk, crit_disk, warn_temp, crit_temp, updated_at
+		FROM host_config WHERE host_id = ?`, hostID)
+	var (
+		cfg                = DefaultHostConfig(hostID)
+		familiesJSON       string
+		intervalsJSON      string
+		filtersJSON        string
+		retentionOverrides string
+	)
+	err := row.Scan(
+		&cfg.SampleIntervalS, &familiesJSON, &intervalsJSON, &filtersJSON, &cfg.MemCalc,
+		&cfg.RetentionDays, &retentionOverrides, &cfg.PrimarySensor, &cfg.PrimaryMount,
+		&cfg.WarnCPU, &cfg.CritCPU, &cfg.WarnMem, &cfg.CritMem, &cfg.WarnDisk, &cfg.CritDisk, &cfg.WarnTemp, &cfg.CritTemp, &cfg.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return cfg, nil
+	}
+	if err != nil {
+		return cfg, err
+	}
+	if familiesJSON != "" {
+		_ = json.Unmarshal([]byte(familiesJSON), &cfg.EnabledFamilies)
+	}
+	if intervalsJSON != "" {
+		_ = json.Unmarshal([]byte(intervalsJSON), &cfg.FamilyIntervals)
+	}
+	if filtersJSON != "" {
+		_ = json.Unmarshal([]byte(filtersJSON), &cfg.Filters)
+	}
+	if retentionOverrides != "" {
+		_ = json.Unmarshal([]byte(retentionOverrides), &cfg.RetentionOverrides)
+	}
+	return cfg, nil
+}
+
+// UpsertHostConfig writes the per-host monitoring policy. JSON-typed fields
+// are serialized; numeric and string fields go in directly.
+func (s *Store) UpsertHostConfig(ctx context.Context, cfg types.HostConfig) error {
+	familiesJSON, _ := json.Marshal(cfg.EnabledFamilies)
+	intervalsJSON, _ := json.Marshal(cfg.FamilyIntervals)
+	filtersJSON, _ := json.Marshal(cfg.Filters)
+	retentionJSON, _ := json.Marshal(cfg.RetentionOverrides)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO host_config (host_id, sample_interval_s, enabled_families, family_intervals, filters, mem_calc,
+		                        retention_days, retention_overrides, primary_sensor, primary_mount,
+		                        warn_cpu, crit_cpu, warn_mem, crit_mem, warn_disk, crit_disk, warn_temp, crit_temp, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(host_id) DO UPDATE SET
+			sample_interval_s   = excluded.sample_interval_s,
+			enabled_families    = excluded.enabled_families,
+			family_intervals    = excluded.family_intervals,
+			filters             = excluded.filters,
+			mem_calc            = excluded.mem_calc,
+			retention_days      = excluded.retention_days,
+			retention_overrides = excluded.retention_overrides,
+			primary_sensor      = excluded.primary_sensor,
+			primary_mount       = excluded.primary_mount,
+			warn_cpu = excluded.warn_cpu, crit_cpu = excluded.crit_cpu,
+			warn_mem = excluded.warn_mem, crit_mem = excluded.crit_mem,
+			warn_disk = excluded.warn_disk, crit_disk = excluded.crit_disk,
+			warn_temp = excluded.warn_temp, crit_temp = excluded.crit_temp,
+			updated_at = CURRENT_TIMESTAMP`,
+		cfg.HostID, cfg.SampleIntervalS, string(familiesJSON), string(intervalsJSON), string(filtersJSON), cfg.MemCalc,
+		cfg.RetentionDays, string(retentionJSON), cfg.PrimarySensor, cfg.PrimaryMount,
+		cfg.WarnCPU, cfg.CritCPU, cfg.WarnMem, cfg.CritMem, cfg.WarnDisk, cfg.CritDisk, cfg.WarnTemp, cfg.CritTemp,
+	)
+	return err
+}
+
+// PruneMetricsPerTable deletes rows older than the per-table cutoff. The
+// caller computes cutoffs from each host's retention policy and passes a
+// table→cutoff map. Tables not in the map are skipped (not pruned).
+// Returns the total number of rows deleted across all tables.
+func (s *Store) PruneMetricsPerTable(ctx context.Context, cutoffs map[string]time.Time) (int64, error) {
+	var total int64
+	for table, cutoff := range cutoffs {
+		// Defensive: only allow the metric tables we know about. Prevents a
+		// future bug from letting an arbitrary table name slip into a DELETE.
+		switch table {
+		case "metrics", "net_iface_metrics", "disk_mount_metrics", "disk_io_metrics",
+			"temp_metrics", "cpu_core_metrics", "process_metrics", "container_metrics":
+		default:
+			continue
+		}
+		res, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE ts < ?`, cutoff)
+		if err != nil {
+			return total, fmt.Errorf("prune %s: %w", table, err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
 // --- alert rules ---
 
 // scanAlertRule reads one alert_rules row. hostID may be NULL (applies to all
