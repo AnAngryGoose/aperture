@@ -173,6 +173,16 @@ func (s *Server) Router(webFS fs.FS) http.Handler {
 			r.Get("/monitoring/catalog", s.monitoringCatalog)
 			r.Get("/hosts/{id}/monitoring/bundle", s.monitoringBundle)
 
+			// Global monitoring defaults (thresholds + retention + mem_calc)
+			// applied to hosts without a host_config row. Edited from Settings.
+			r.Get("/settings/monitoring-defaults", s.getMonitoringDefaults)
+			r.Put("/settings/monitoring-defaults", s.putMonitoringDefaults)
+
+			// Alert template apply: POST {template:"...", host_id:null|"id"}
+			// → creates the template's rules (skipping duplicates). Used by
+			// the "Apply template" button in the alert rule editor.
+			r.Post("/alerts/templates/apply", s.applyAlertTemplate)
+
 			// Per-host monitoring config (sample interval, enabled families,
 			// filters, thresholds, retention). PUT pushes the change to the
 			// running collector/agent so it takes effect on the next tick.
@@ -1277,7 +1287,10 @@ func (p alertChannelPayload) toChannel(id int64) types.AlertChannel {
 }
 
 func validateChannelType(t string) error {
-	for _, v := range []string{"discord", "slack", "ntfy", "gotify", "webhook"} {
+	// "shoutrrr" lets users paste a raw URL for any of Shoutrrr's 16+
+	// supported services (Telegram, Matrix, Pushover, Teams, etc.). The
+	// other names route through the same dispatcher with a translated URL.
+	for _, v := range []string{"discord", "slack", "ntfy", "gotify", "webhook", "shoutrrr"} {
 		if t == v {
 			return nil
 		}

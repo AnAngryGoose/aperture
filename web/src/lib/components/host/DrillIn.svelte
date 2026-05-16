@@ -121,13 +121,26 @@
 						data={entry.netInSeries}
 						color="var(--info)"
 					/>
-					<BigMetric
-						label="Temperature"
-						value="—°C"
-						sub=""
-						data={[]}
-						color="var(--warn)"
-					/>
+					{#if (s?.temps ?? []).length > 0}
+						{@const temps = s!.temps!}
+						{@const maxTemp = temps.reduce((a, t) => Math.max(a, t.temp_celsius), 0)}
+						{@const tempColor = maxTemp >= 85 ? 'var(--crit)' : maxTemp >= 70 ? 'var(--warn)' : 'var(--info)'}
+						<BigMetric
+							label="Temperature"
+							value="{maxTemp.toFixed(1)}°C"
+							sub="{temps.length} sensor{temps.length === 1 ? '' : 's'}"
+							data={[]}
+							color={tempColor}
+						/>
+					{:else}
+						<BigMetric
+							label="Temperature"
+							value="—"
+							sub="no sensors"
+							data={[]}
+							color="var(--text-faint)"
+						/>
+					{/if}
 				</div>
 
 				<!-- Lower panels -->
@@ -138,6 +151,19 @@
 					<div class="panel-card">
 						{#if kind === 'docker'}
 							<ContainersPanel {containers} loading={loadingContainers} />
+						{:else if (s?.processes ?? []).length > 0}
+							<!-- Top-5 by CPU peek for bare-metal hosts -->
+							<div class="proc-peek">
+								<div class="label-mono">Top by CPU</div>
+								<div class="proc-list">
+									{#each [...(s!.processes!)].sort((a, b) => b.cpu_pct - a.cpu_pct).slice(0, 5) as p}
+										<div class="proc-row">
+											<span class="proc-name">{p.name}</span>
+											<span class="proc-cpu mono">{p.cpu_pct.toFixed(1)}%</span>
+										</div>
+									{/each}
+								</div>
+							</div>
 						{:else}
 							<div class="text-faint" style="font-size:12px;">
 								Uptime: <span class="mono">{s?.uptime_secs ? fmtDuration(s.uptime_secs) : '—'}</span>
@@ -147,6 +173,29 @@
 					<div class="panel-card">
 						<EventsPanel events={alerts} />
 					</div>
+				</div>
+
+				{#if (s?.temps ?? []).length > 0}
+					<div class="sensors-mini">
+						<div class="label-mono">Sensors</div>
+						<div class="sensor-grid">
+							{#each (s?.temps ?? []) as sensor}
+								{@const c = sensor.temp_celsius}
+								{@const color = c >= 85 ? 'var(--crit)' : c >= 70 ? 'var(--warn)' : 'var(--info)'}
+								<div class="sensor-cell" style="border-color:{color};">
+									<span class="sensor-temp mono" style="color:{color}">{c.toFixed(1)}°</span>
+									<span class="sensor-name mono">{sensor.name}</span>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				<!-- CTA into the full host monitoring page -->
+				<div class="full-cta">
+					<a href="/hosts/{entry.host.id}" class="full-link" onclick={onclose}>
+						Open full host monitoring →
+					</a>
 				</div>
 			{:else if activeTab === 'containers'}
 				<div style="padding:16px;">
@@ -332,4 +381,89 @@
 		font-size: 13px;
 		color: var(--accent);
 	}
+
+	.label-mono {
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-faint);
+		font-family: var(--font-mono);
+		margin-bottom: 8px;
+	}
+
+	.proc-peek {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+	}
+
+	.proc-list {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.proc-row {
+		display: flex;
+		justify-content: space-between;
+		gap: 8px;
+		font-size: 12px;
+	}
+
+	.proc-name {
+		color: var(--text);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.proc-cpu {
+		color: var(--text-dim);
+		flex-shrink: 0;
+	}
+
+	.sensors-mini {
+		padding: 12px 16px;
+		background: var(--bg-elev);
+		border: 1px solid var(--line);
+		border-radius: var(--r-lg);
+	}
+
+	.sensor-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+		gap: 8px;
+	}
+
+	.sensor-cell {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 8px 10px;
+		background: var(--bg-elev-2);
+		border-left: 2px solid var(--line);
+		border-radius: var(--r-md);
+	}
+
+	.sensor-temp { font-size: 15px; font-weight: 500; letter-spacing: -0.02em; }
+	.sensor-name { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); }
+
+	.full-cta {
+		display: flex;
+		justify-content: center;
+		padding: 6px 0;
+	}
+
+	.full-link {
+		font-size: 13px;
+		color: var(--accent);
+		font-family: var(--font-mono);
+		text-decoration: none;
+		padding: 6px 14px;
+		border-radius: var(--r-md);
+		transition: background 120ms;
+	}
+	.full-link:hover { background: var(--accent-soft); }
 </style>

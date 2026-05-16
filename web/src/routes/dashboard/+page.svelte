@@ -1,15 +1,13 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api';
-	import { hostStore } from '$lib/stores/hosts.svelte';
+	import { monitoringStore, type HostEntry } from '$lib/stores/monitoring.svelte';
 	import { dashboardLayout } from '$lib/stores/dashboardLayout.svelte';
-	import { toast } from '$lib/toast';
 	import PageHeader from '$lib/components/dashboard/PageHeader.svelte';
 	import FilterBar from '$lib/components/dashboard/FilterBar.svelte';
 	import HostGrid from '$lib/components/dashboard/HostGrid.svelte';
 	import DrillIn from '$lib/components/host/DrillIn.svelte';
 	import AddHostModal from '$lib/components/addhost/AddHostModal.svelte';
-	import type { HostEntry } from '$lib/stores/hosts.svelte';
 
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -19,37 +17,14 @@
 
 	const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? 'http://localhost:8080' : '');
 
-	async function load() {
+	// Single overview fetch — replaces the prior N+1 fan-out (hosts list +
+	// latest-per-host + containers-per-docker-host). Live updates come from
+	// SSE; this poll is just a reconciliation safety net at 30s cadence.
+	async function reconcile() {
 		try {
-			const hosts = await api.hosts.list();
-			// Fetch latest metrics per host in parallel.
-			const metricResults = await Promise.allSettled(
-				hosts.map((h) => api.latest(h.id))
-			);
-			const sampleMap: Record<string, any> = {};
-			hosts.forEach((h, i) => {
-				const r = metricResults[i];
-				if (r.status === 'fulfilled' && r.value) sampleMap[h.id] = r.value;
-			});
-			hostStore.setAll(hosts, sampleMap);
+			const overview = await api.monitoring.overview();
+			monitoringStore.hydrate(overview);
 			error = null;
-
-			// Fetch container counts for docker-kind hosts in parallel and propagate.
-			// Failures per-host are silent — the card just keeps showing — until the next poll.
-			const dockerHosts = hosts.filter((h) => h.kind === 'docker');
-			const containerResults = await Promise.allSettled(
-				dockerHosts.map((h) => api.containers(h.id, true))
-			);
-			dockerHosts.forEach((h, i) => {
-				const r = containerResults[i];
-				if (r.status !== 'fulfilled') return;
-				const list = r.value;
-				hostStore.setContainerCounts(h.id, {
-					running: list.filter((c) => c.state === 'running').length,
-					stopped: list.filter((c) => c.state !== 'running').length,
-					unhealthy: list.filter((c) => /unhealthy/i.test(c.status ?? '')).length
-				});
-			});
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load hosts';
 		} finally {
@@ -59,15 +34,16 @@
 
 	onMount(() => {
 		dashboardLayout.init();
-		load();
-		pollTimer = setInterval(load, 5000);
-		// Connect SSE for live sparkline updates.
-		hostStore.connectSSE(API_BASE);
+		reconcile();
+		// 30s, not 5s — SSE handles live updates; this poll only catches up
+		// after disconnects or missed events.
+		pollTimer = setInterval(reconcile, 30_000);
+		monitoringStore.connectSSE(API_BASE);
 	});
 
 	onDestroy(() => {
 		clearInterval(pollTimer);
-		hostStore.disconnectSSE();
+		monitoringStore.disconnectSSE();
 	});
 
 	function openDrillIn(entry: HostEntry) {
@@ -85,14 +61,14 @@
 	<PageHeader />
 	<FilterBar onaddhost={() => (showAddHost = true)} />
 	<HostGrid
-		entries={hostStore.list}
+		entries={monitoringStore.list}
 		layout={dashboardLayout.cardLayout}
 		{loading}
 		{error}
 		filter={dashboardLayout.activeFilter}
 		onselect={openDrillIn}
 		onaddhost={() => (showAddHost = true)}
-		onretry={load}
+		onretry={reconcile}
 	/>
 </div>
 

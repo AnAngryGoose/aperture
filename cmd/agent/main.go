@@ -32,7 +32,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 )
 
-const agentVersion = "0.4.0-alpha.2"
+const agentVersion = "0.4.1-alpha.1"
 
 // ── wire frame types (must match hub/agentws.go) ────────────────────────────
 

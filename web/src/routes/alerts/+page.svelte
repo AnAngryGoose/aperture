@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api';
-	import type { AlertRule, AlertEvent, AlertMetadata, AlertChannel, Host } from '$lib/types';
+	import type { AlertRule, AlertEvent, AlertMetadata, AlertChannel, Host, MonitoringCatalog } from '$lib/types';
 	import { relTime } from '$lib/format';
 
 	// ── data state ──────────────────────────────────────────────────────────────
@@ -32,6 +32,108 @@
 	});
 	let ruleFormError = $state<string | null>(null);
 	let ruleFormSaving = $state(false);
+
+	// ── rule metric picker (two-step) ────────────────────────────────────────
+	// Builder state for assembling `ruleForm.metric` from a category + target +
+	// leaf trio. Categories come from /api/monitoring/catalog.alertCategories.
+	// "simple" picks a flat scalar (cpu_pct / mem_pct / load_1 / temp.max).
+	// "host" is special-cased — host.status uses an encoded numeric mapping
+	// (ok=0..offline=3) so the existing threshold pipeline works unchanged.
+	type RuleMode = 'simple' | 'iface' | 'mount' | 'temp' | 'proc' | 'host';
+
+	let ruleBuilder = $state({
+		mode:        'simple' as RuleMode,
+		scalar:      'cpu_pct',
+		target:      '',
+		leaf:        '',
+		statusValue: 'offline' // for mode='host': encodes to threshold 3
+	});
+
+	const STATUS_ENCODING: Record<string, number> = {
+		ok: 0, warn: 1, crit: 2, offline: 3
+	};
+
+	// Derived: what metric string does the builder produce, given its mode.
+	const builtMetric = $derived.by(() => {
+		const b = ruleBuilder;
+		switch (b.mode) {
+			case 'simple':
+				return b.scalar;
+			case 'host':
+				return 'host.status';
+			case 'iface':
+			case 'mount':
+			case 'temp':
+			case 'proc':
+				if (!b.target || !b.leaf) return '';
+				return `${b.mode}.${b.target}.${b.leaf}`;
+		}
+		return '';
+	});
+
+	// Whenever the builder changes, push the assembled metric (and any forced
+	// op/threshold from host-status mode) onto the ruleForm so submitRule
+	// stays single-source-of-truth on the wire shape. Untrack ruleForm to
+	// avoid a loop where ruleForm changes re-trigger this effect.
+	$effect(() => {
+		void ruleBuilder.mode;
+		void ruleBuilder.scalar;
+		void ruleBuilder.target;
+		void ruleBuilder.leaf;
+		void ruleBuilder.statusValue;
+		ruleForm.metric = builtMetric;
+		if (ruleBuilder.mode === 'host') {
+			ruleForm.op = '==';
+			ruleForm.threshold = STATUS_ENCODING[ruleBuilder.statusValue] ?? 3;
+		}
+	});
+
+	// Allowed leaf suffixes per category — sourced from the catalog so the
+	// picker stays in sync with backend changes. Falls back to a hardcoded
+	// list if the catalog hasn't loaded yet.
+	const leafOptions = $derived.by(() => {
+		const m = ruleBuilder.mode;
+		if (m === 'simple' || m === 'host') return [];
+		return catalog?.alertCategories?.[m] ?? defaultLeaves(m);
+	});
+
+	function defaultLeaves(mode: string): string[] {
+		switch (mode) {
+			case 'iface': return ['rx_rate', 'tx_rate', 'rx_bytes', 'tx_bytes'];
+			case 'mount': return ['pct', 'used', 'total'];
+			case 'temp':  return ['value'];
+			case 'proc':  return ['cpu_pct', 'mem_pct', 'mem_rss'];
+		}
+		return [];
+	}
+
+	// Placeholder text for the target field, hinting at what to enter.
+	const targetPlaceholder = $derived.by(() => {
+		switch (ruleBuilder.mode) {
+			case 'iface': return 'e.g. eth0';
+			case 'mount': return 'e.g. / or /var';
+			case 'temp':  return 'e.g. cpu_thermal';
+			case 'proc':  return 'e.g. nginx';
+		}
+		return '';
+	});
+
+	// Scalar metric list = the catalog's scalarMetrics minus temp.max and
+	// host.status (which have their own picker modes). Falls back to the
+	// alertMetadata meta.metrics until the catalog loads.
+	const scalarOptions = $derived.by(() => {
+		const all = catalog?.scalarMetrics ?? meta?.metrics ?? [];
+		return all.filter((m) => m !== 'host.status' && m !== 'temp.max').concat(['temp.max']);
+	});
+
+	// Initialize leaf when category changes so it points to a valid value.
+	$effect(() => {
+		void ruleBuilder.mode;
+		const opts = leafOptions;
+		if (opts.length > 0 && !opts.includes(ruleBuilder.leaf)) {
+			ruleBuilder.leaf = opts[0];
+		}
+	});
 
 	// ── channel modal ────────────────────────────────────────────────────────────
 	type HeaderRow = { key: string; value: string };
@@ -177,6 +279,45 @@
 			meta = await api.alertMetadata();
 		} catch (e) {
 			error = (e as Error).message;
+		}
+	}
+
+	// ── alert template apply ────────────────────────────────────────────────
+	// Catalog is loaded once on mount; templates are server-defined so a
+	// future "Custom thresholds" template lands without touching this file.
+	let catalog       = $state<MonitoringCatalog | null>(null);
+	let tplName       = $state<string>('');
+	let tplHostScope  = $state<string>('');   // '' = global, otherwise host id
+	let tplApplying   = $state(false);
+	let tplResult     = $state<string | null>(null);
+	let tplError      = $state<string | null>(null);
+
+	async function loadCatalog() {
+		try {
+			catalog = await api.monitoring.catalog();
+			if (!tplName && catalog.templates.length > 0) {
+				tplName = catalog.templates[0].name;
+			}
+		} catch (e) {
+			// Catalog is non-fatal — the rest of the page works without it.
+			console.warn('Failed to load monitoring catalog', e);
+		}
+	}
+
+	async function applyTemplate() {
+		if (!tplName) return;
+		tplApplying = true;
+		tplResult = null;
+		tplError = null;
+		try {
+			const res = await api.applyAlertTemplate(tplName, tplHostScope || null);
+			tplResult = `${tplName}: ${res.created_n} rule${res.created_n === 1 ? '' : 's'} created`
+				+ (res.skipped_n > 0 ? ` · ${res.skipped_n} already existed` : '');
+			await refresh();
+		} catch (e) {
+			tplError = (e as Error).message;
+		} finally {
+			tplApplying = false;
 		}
 	}
 
@@ -328,8 +469,11 @@
 	// ── lifecycle ─────────────────────────────────────────────────────────────────
 	onMount(() => {
 		loadMeta();
+		loadCatalog();
 		refresh();
-		timer = setInterval(refresh, 5000);
+		// 5s is aggressive for a viewable-but-not-critical page; bring it down
+		// to 15s so it isn't a third of the dashboard's traffic on idle.
+		timer = setInterval(refresh, 15_000);
 	});
 	onDestroy(() => { if (timer) clearInterval(timer); });
 
@@ -377,25 +521,69 @@
 			</select>
 		</label>
 		<label>
-			<span>Metric</span>
-			<select bind:value={ruleForm.metric}>
-				{#each meta?.metrics ?? [] as m}
-					<option value={m}>{m}</option>
-				{/each}
+			<span>Category</span>
+			<select bind:value={ruleBuilder.mode}>
+				<option value="simple">scalar (host-wide)</option>
+				<option value="iface">iface (per interface)</option>
+				<option value="mount">mount (per filesystem)</option>
+				<option value="temp">temp (per sensor)</option>
+				<option value="proc">proc (per process name)</option>
+				<option value="host">host status</option>
 			</select>
 		</label>
-		<label>
-			<span>Op</span>
-			<select bind:value={ruleForm.op}>
-				{#each meta?.ops ?? [] as o}
-					<option value={o}>{o}</option>
-				{/each}
-			</select>
-		</label>
-		<label>
-			<span>Threshold</span>
-			<input type="number" step="any" bind:value={ruleForm.threshold} />
-		</label>
+
+		{#if ruleBuilder.mode === 'simple'}
+			<label>
+				<span>Metric</span>
+				<select bind:value={ruleBuilder.scalar}>
+					{#each scalarOptions as m}
+						<option value={m}>{m}</option>
+					{/each}
+				</select>
+			</label>
+		{:else if ruleBuilder.mode === 'host'}
+			<label>
+				<span>Status</span>
+				<select bind:value={ruleBuilder.statusValue}>
+					<option value="ok">ok</option>
+					<option value="warn">warn</option>
+					<option value="crit">crit</option>
+					<option value="offline">offline</option>
+				</select>
+			</label>
+		{:else}
+			<label>
+				<span>Target</span>
+				<input
+					type="text"
+					placeholder={targetPlaceholder}
+					bind:value={ruleBuilder.target}
+				/>
+			</label>
+			<label>
+				<span>Leaf</span>
+				<select bind:value={ruleBuilder.leaf}>
+					{#each leafOptions as l}
+						<option value={l}>{l}</option>
+					{/each}
+				</select>
+			</label>
+		{/if}
+
+		{#if ruleBuilder.mode !== 'host'}
+			<label>
+				<span>Op</span>
+				<select bind:value={ruleForm.op}>
+					{#each meta?.ops ?? [] as o}
+						<option value={o}>{o}</option>
+					{/each}
+				</select>
+			</label>
+			<label>
+				<span>Threshold</span>
+				<input type="number" step="any" bind:value={ruleForm.threshold} />
+			</label>
+		{/if}
 		<label>
 			<span>Duration (s)</span>
 			<input type="number" min="0" bind:value={ruleForm.duration_s} />
@@ -418,6 +606,47 @@
 		<div class="form-err">{ruleFormError}</div>
 	{/if}
 </div>
+
+{#if catalog && catalog.templates.length > 0}
+	<div class="card tpl-card">
+		<div class="tpl-head">
+			<div>
+				<div class="tpl-title">Apply template</div>
+				<div class="tpl-sub muted">
+					{#if tplName}
+						{(catalog.templates.find(t => t.name === tplName)?.description) ?? ''}
+					{:else}
+						Pick a template to seed rules from a known-good preset.
+					{/if}
+				</div>
+			</div>
+		</div>
+		<div class="tpl-controls">
+			<label class="tpl-field">
+				<span class="tpl-cap">Template</span>
+				<select bind:value={tplName}>
+					{#each catalog.templates as t}
+						<option value={t.name}>{t.name} ({t.rules.length})</option>
+					{/each}
+				</select>
+			</label>
+			<label class="tpl-field">
+				<span class="tpl-cap">Scope</span>
+				<select bind:value={tplHostScope}>
+					<option value="">all hosts (global rules)</option>
+					{#each hosts as h}
+						<option value={h.id}>{h.name}</option>
+					{/each}
+				</select>
+			</label>
+			<button class="tpl-apply" onclick={applyTemplate} disabled={tplApplying || !tplName}>
+				{tplApplying ? 'Applying…' : 'Apply'}
+			</button>
+			{#if tplResult}<span class="tpl-ok mono">{tplResult}</span>{/if}
+			{#if tplError}<span class="tpl-err">{tplError}</span>{/if}
+		</div>
+	</div>
+{/if}
 
 <div class="card no-pad">
 	<h2 style="padding: 12px 16px 0">Rules</h2>
@@ -893,4 +1122,45 @@
 		font-size: 11px;
 		padding: 4px 8px;
 	}
+
+	/* Template apply panel */
+	.tpl-card { padding: 14px 16px; }
+	.tpl-head { margin-bottom: 12px; }
+	.tpl-title { font-size: 14px; font-weight: 600; color: var(--text); }
+	.tpl-sub { font-size: 12px; margin-top: 2px; }
+	.tpl-controls {
+		display: flex;
+		align-items: flex-end;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+	.tpl-field { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+	.tpl-cap {
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-faint);
+		font-family: var(--font-mono);
+	}
+	.tpl-field select {
+		padding: 6px 10px;
+		font-size: 12px;
+		background: var(--bg-elev-2);
+		color: var(--text);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
+	}
+	.tpl-apply {
+		padding: 7px 14px;
+		font-size: 12px;
+		color: #fff;
+		background: var(--accent);
+		border: 1px solid var(--accent);
+		border-radius: var(--r-md);
+		cursor: pointer;
+	}
+	.tpl-apply:hover { filter: brightness(1.05); }
+	.tpl-apply:disabled { opacity: 0.5; cursor: not-allowed; }
+	.tpl-ok  { color: var(--ok);   font-size: 11px; }
+	.tpl-err { color: var(--crit); font-size: 11px; }
 </style>

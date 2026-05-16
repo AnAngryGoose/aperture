@@ -1,32 +1,20 @@
 # Aperture
 
-A self-hosted homelab command center. One interface for system metrics, container management, alerts, and remote host monitoring — designed to replace Beszel, Portainer/Dockge, and Dozzle with a single coherent tool.
+A self-hosted homelab command center. One UI for system metrics, container management, and alerts across local + remote hosts. Designed to replace Beszel, Portainer/Dockge, and Dozzle with a single tool.
 
-**Current version: v0.3.0-alpha.4**
+**Current version: v0.4.1-alpha.1**
 
 ---
 
 ## Contents
 
 - [What it does](#what-it-does)
-- [Screenshots / UI overview](#ui-overview)
-- [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [Building](#building)
 - [Running the hub](#running-the-hub)
-  - [Hub configuration](#hub-configuration)
-  - [Systemd service](#hub-as-a-systemd-service)
-  - [Docker](#hub-in-docker)
 - [Adding remote hosts (agents)](#adding-remote-hosts-agents)
-  - [How it works](#how-it-works)
-  - [Step 1 — generate a token](#step-1--generate-a-token-in-the-ui)
-  - [Step 2 — run the agent](#step-2--run-the-agent)
-  - [Agent configuration](#agent-configuration)
-  - [Agent systemd service](#agent-as-a-systemd-service)
-  - [Agent in Docker](#agent-in-docker)
-  - [Token management](#token-management)
+- [Per-host monitoring config](#per-host-monitoring-config)
 - [Alerts](#alerts)
-  - [Notification channels](#notification-channels)
 - [API reference](#api-reference)
 - [Development setup](#development-setup)
 - [Troubleshooting](#troubleshooting)
@@ -36,199 +24,92 @@ A self-hosted homelab command center. One interface for system metrics, containe
 
 ## What it does
 
-### Monitoring
-- **System metrics** collected every 5 seconds: CPU (aggregate + per-core), memory (used / cached / free), swap, disk usage per mount, disk I/O per device, network throughput per interface, load averages, uptime, temperatures.
-- **Process list** — top 40 processes by CPU or memory, live.
-- **Historical charts** — CPU, memory, disk, network, load average, per-interface network, per-mount disk, per-device I/O — across 15m / 1h / 6h / 24h windows. Drag to zoom, double-click to reset.
-- **Multi-host** — hub embeds a local collector for the machine it runs on; remote hosts connect via lightweight agents over WebSocket.
+**Monitoring**
+- CPU (aggregate + per-core), memory (used/cached/free + ZFS-ARC-aware via `mem_calc`), swap, disk per mount, disk I/O per device, network per interface, load, uptime, temperatures, top processes, container stats — all with historical charts.
+- Per-host **monitoring config** persisted in SQLite: pick which families collect, NIC/sensor/mount allow/deny filters, per-host warn/crit thresholds, retention overrides.
+- **Multi-host** via lightweight agents (outbound WebSocket — no port forward needed at the agent).
+- Single **`/api/monitoring/{overview,bundle,catalog}`** endpoints replace per-host polling: one fetch + typed SSE for live updates.
 
-### Container management
-- Full lifecycle: create, start, stop, pause, unpause, restart, kill, remove, recreate.
-- Live CPU / memory stats per container, port mappings, mount list.
-- Deep inspect panel: config, env vars, labels, resource limits — all inline in the table row.
-- Live resource editing (CPU cores / memory) with no container restart.
-- Log viewer with search/filter.
-- Create new containers with a form (image, name, restart policy, env vars, port bindings, volume mounts, auto-start toggle).
+**Containers**
+- Full lifecycle (create/start/stop/restart/recreate/remove), live stats, deep inspect, live CPU/mem limit edits, logs.
+- Per-host container summary cached in the hub and broadcast over SSE — no fan-out Docker polling from the browser.
 
-### Alerts
-- Threshold rules: any metric (`cpu_pct`, `mem_pct`, `disk_pct`, `swap_pct`, `load1`) with any comparison operator, optional sustained-breach duration before firing.
-- Per-rule severity: `info`, `warning`, `critical`.
-- Auto-resolves when the breach ends. Full event history.
-- Red badge on the Alerts nav link shows firing count from anywhere in the app.
+**Alerts**
+- **Threshold rules** on flat scalars (`cpu_pct`, `mem_pct`, `disk_pct`, `swap_pct`, `load_1/5/15`, `temp.max`) and **dotted targets** (`iface.eth0.rx_rate`, `mount./.pct`, `temp.cpu_thermal.value`, `proc.nginx.cpu_pct`, `host.status`).
+- Sustained-breach duration, severity (info/warning/critical), auto-resolve.
+- **Status alerts** — `host.status == offline` fires via an offline watchdog when a host stops sending samples.
+- **Templates** — apply "Beszel defaults" / "Aggressive" / "Quiet" preset rule sets per-host or globally.
+- **Notifications** through 17+ services via Shoutrrr (Discord, Slack, Telegram, Matrix, Pushover, Teams, ntfy, Gotify, Mattermost, Rocketchat, etc.) plus a generic webhook.
 
-### Notification channels
-Five channel types, all configurable from the UI with a Test button:
-- **Discord** — rich embed with severity-coded color and field layout.
-- **Slack** — incoming webhook with attachment.
-- **ntfy** — push to any ntfy instance (self-hosted or ntfy.sh) with priority and emoji tags.
-- **Gotify** — POST to a Gotify server with auto-mapped priority.
-- **Generic webhook** — POST a structured JSON payload to any URL, with custom headers and method.
-
-Per-channel: minimum severity filter (suppress info-level noise on critical channels), resolve-notify toggle.
-
----
-
-## UI overview
-
-```
-Hosts (dashboard)
-│
-├── Host card — status pill (online/stale/offline), CPU/mem/disk bars,
-│              alert badge, net throughput, container count, last-seen
-│
-└── Host detail (/hosts/{id})
-    ├── Overview tab
-    │   ├── Stat cards: CPU, Memory (segmented bar), Disk, Uptime
-    │   ├── Live tables: per-core CPU, network interfaces, disk mounts,
-    │   │              disk I/O, temperatures, processes
-    │   └── Charts: aggregate + per-interface + per-mount + per-device
-    └── Containers tab
-        ├── Filter bar: state + text search (name/image)
-        ├── Table with inline inspect + logs
-        └── Create modal
-
-Alerts (/alerts)
-├── Rules tab — create/edit/delete rules, severity badge
-├── Events tab — firing/resolved history
-└── Channels tab — add/edit/test notification channels
-
-Settings (/settings)
-└── Agent tokens — generate, list, revoke
-```
-
----
-
-## Architecture
-
-```
-                       ┌─────────────────────────────────────────┐
-                       │ aperture-hub                            │
-                       │                                         │
-  Browser ──HTTP──────►│ SvelteKit SPA  (static, served by hub) │
-                       │        │                                │
-                       │        ▼                                │
-                       │   /api/*  (chi router)                  │
-                       │        │                                │
-                       │   ┌────┴────────────────────┐          │
-                       │   │ internal/hub             │          │
-                       │   │  ├─ host registry        │          │
-                       │   │  ├─ ingest loop          │          │
-                       │   │  ├─ retention pruner     │          │
-                       │   │  └─ alert evaluator      │          │
-                       │   └────┬──────────┬──────────┘          │
-                       │        │          │                      │
-                       │  local collector  │  AgentHandler        │
-                       │  (gopsutil)       │  (WebSocket)         │
-                       │                  │                      │
-                       └──────────────────┼──────────────────────┘
-                                          │ ws:// (token auth)
-                              ┌───────────┴────────────┐
-                              │                        │
-                      aperture-agent            aperture-agent
-                      (nas-box)                 (media-server)
-                      collector + dockerctl     collector + dockerctl
-```
-
-The hub auto-registers itself as a local host on startup. Remote hosts run `aperture-agent`, which connects outbound to the hub over WebSocket — no port forwarding needed on the agent side, no polling from the hub.
+**UI (v0.4)**
+- Sidebar shell, Geist font, dark/light/system theme, six accent colors.
+- Dashboard with rich/tile/list card variants + a per-card widget picker (pick 2–4 metrics per host).
+- Host detail with 10 tabs: Overview / CPU / Memory / Disk / Network / Sensors / Processes / Docker / Events / Settings.
+- Drag-to-zoom charts, live SSE sparklines, drill-in slide-over modal.
 
 ---
 
 ## Quick start
 
 ```sh
-# 1. Clone and build
 git clone <repo> aperture && cd aperture
 make build
-
-# 2. Run the hub
 ./bin/aperture-hub -web-dir web/build
-
-# 3. Open the dashboard
-open http://localhost:8080
+# Open http://localhost:8080 — you'll be redirected to /setup to create an admin password.
 ```
 
-The hub immediately starts monitoring the local machine. No configuration is required to get the dashboard up.
+The hub auto-registers itself as a local host and starts sampling immediately. No config needed for the basic case.
 
 ---
 
 ## Building
 
-### Prerequisites
-
-| Requirement | Version | Notes |
-|---|---|---|
-| Go | ≥ 1.25 | Required by `modernc.org/sqlite` (pure-Go, no CGO) |
-| Node.js | ≥ 20 | For the SvelteKit frontend |
-| npm | ≥ 10 | Bundled with Node.js ≥ 16 |
-| Docker daemon | any | Optional — container features only; metrics work without it |
-
-On Debian/Ubuntu:
-```sh
-sudo apt-get install -y golang-go nodejs npm
-```
-
-### Build commands
+Requires Go ≥ 1.25 (pure-Go SQLite, no CGO) and Node.js ≥ 20.
 
 ```sh
-make build    # build everything: web/build + bin/aperture-hub + bin/aperture-agent
-make hub      # hub binary only → bin/aperture-hub
-make agent    # agent binary only → bin/aperture-agent
-make web      # frontend only → web/build/
+make build    # everything: web/build + bin/aperture-hub + bin/aperture-agent
+make hub      # hub binary only
+make agent    # agent binary only
+make web      # frontend only
+make dev      # hub with -tags dev (CORS for the Vite dev server)
 make tidy     # go mod tidy
-make clean    # remove bin/, web/build/, web/.svelte-kit/
+make clean
 ```
 
 ---
 
 ## Running the hub
 
-The hub is a single binary that serves both the API and the SvelteKit SPA.
-
 ```sh
 ./bin/aperture-hub -web-dir web/build
-# → listening on :8080
 ```
 
-On first start it creates `aperture.db` in the working directory, registers the local machine as a host, and begins sampling metrics every 5 seconds. Open the dashboard — you'll be redirected to the one-time setup page to set an admin password before the UI is accessible.
+The hub serves both the API and the SPA from a single binary. First start creates `aperture.db`, registers the local machine, and begins sampling.
 
-### Hub configuration
+### Hub flags
 
-All flags accept an environment variable equivalent. Flags take precedence over env vars.
-
-| Flag | Env var | Default | Description |
+| Flag | Env var | Default | Notes |
 |---|---|---|---|
-| `-listen` | `APERTURE_LISTEN` | `:8080` | HTTP listen address. Use `0.0.0.0:8080` to bind all interfaces. |
-| `-db` | `APERTURE_DB` | `aperture.db` | SQLite database file path. Use an absolute path for a systemd service. |
-| `-interval` | `APERTURE_INTERVAL` | `5s` | How often the local collector samples the machine. Agents set their own interval independently. |
-| `-retain` | `APERTURE_RETAIN` | `336h` (14 days) | How long metric samples are kept. Accepts any Go duration string. `0` keeps forever. |
-| `-disk-path` | `APERTURE_DISK_PATH` | `/` | Filesystem mount point to report disk usage for. Change if your data lives on a different partition (e.g. `/mnt/data`). |
-| `-web-dir` | `APERTURE_WEB_DIR` | *(unset)* | Directory of the built SvelteKit SPA. If unset, the hub is API-only. |
-
-**Examples:**
+| `-listen` | `APERTURE_LISTEN` | `:8080` | Use `0.0.0.0:8080` to bind all interfaces. |
+| `-db` | `APERTURE_DB` | `aperture.db` | Use an absolute path for systemd. |
+| `-interval` | `APERTURE_INTERVAL` | `5s` | Local-collector sample cadence. Agents have their own. Can be overridden per-host via host_config. |
+| `-retain` | `APERTURE_RETAIN` | `336h` (14 days) | Global fallback. Per-host retention takes precedence. `0` = forever. |
+| `-disk-path` | `APERTURE_DISK_PATH` | `/` | Filesystem root for the aggregate disk metric. |
+| `-web-dir` | `APERTURE_WEB_DIR` | *(unset)* | Built SvelteKit assets. Unset = API only. |
 
 ```sh
-# Listen on all interfaces, store DB in /var/lib/aperture/
+# Bind all interfaces, 30-day retention, data on /mnt/storage
 ./bin/aperture-hub \
   -listen 0.0.0.0:8080 \
   -db /var/lib/aperture/aperture.db \
-  -web-dir web/build
-
-# Keep 30 days of data, monitor /mnt/data for disk usage
-./bin/aperture-hub \
   -retain 720h \
-  -disk-path /mnt/data \
+  -disk-path /mnt/storage \
   -web-dir web/build
-
-# Environment variables (e.g. for Docker or systemd)
-APERTURE_LISTEN=0.0.0.0:8080 \
-APERTURE_DB=/var/lib/aperture/aperture.db \
-APERTURE_RETAIN=720h \
-./bin/aperture-hub -web-dir web/build
 ```
 
 ### Hub as a systemd service
 
-Create `/etc/systemd/system/aperture-hub.service`:
+`/etc/systemd/system/aperture-hub.service`:
 
 ```ini
 [Unit]
@@ -244,12 +125,9 @@ WorkingDirectory=/opt/aperture
 ExecStart=/opt/aperture/bin/aperture-hub \
   -listen 0.0.0.0:8080 \
   -db /var/lib/aperture/aperture.db \
-  -web-dir /opt/aperture/web/build \
-  -retain 336h
+  -web-dir /opt/aperture/web/build
 Restart=on-failure
 RestartSec=5s
-
-# The hub needs docker socket access for container management.
 SupplementaryGroups=docker
 
 [Install]
@@ -257,128 +135,45 @@ WantedBy=multi-user.target
 ```
 
 ```sh
-# Create the user and data directory
 sudo useradd -r -s /sbin/nologin aperture
-sudo mkdir -p /var/lib/aperture
-sudo chown aperture:aperture /var/lib/aperture
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable --now aperture-hub
-sudo systemctl status aperture-hub
+sudo mkdir -p /var/lib/aperture && sudo chown aperture:aperture /var/lib/aperture
+sudo systemctl daemon-reload && sudo systemctl enable --now aperture-hub
 ```
-
-### Hub in Docker
-
-```sh
-docker run -d \
-  --name aperture-hub \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -v aperture-data:/data \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v $(pwd)/web/build:/web \
-  -e APERTURE_DB=/data/aperture.db \
-  -e APERTURE_WEB_DIR=/web \
-  ghcr.io/aperture/hub:latest
-```
-
-> **Note:** The Docker image is not published yet (no registry release process exists in v0.2). Build locally with `docker build -t aperture-hub .` once a Dockerfile is added.
 
 ---
 
 ## Adding remote hosts (agents)
 
-### How it works
+Agents are a single binary that connects outbound to the hub over WebSocket. No port forwarding, no polling.
 
-Each remote machine runs `aperture-agent`, a lightweight process that:
-1. Connects **outbound** to the hub over WebSocket (`ws://hub-address:8080/api/agents/ws`).
-2. Authenticates with a pre-shared token you generate in the UI.
-3. Streams metric samples to the hub every 5 seconds (configurable).
-4. Sends heartbeats every 5 seconds to keep `last_seen` fresh.
-5. Receives and executes docker commands from the hub (if docker is available on the agent host).
+### 1. Generate a token in the UI
 
-The agent only needs **outbound** network access to the hub — no firewall rules, port forwards, or VPN tunnels needed beyond what lets the agent reach the hub's address. The hub manages all agent state; if the agent disconnects and reconnects, it re-registers automatically.
+**Settings → + Add agent → Generate token**. Copy the command shown — the token is displayed **once**.
 
-### Step 1 — generate a token in the UI
-
-1. Open the dashboard and click **Settings** in the top navigation.
-2. Click **+ Add agent**.
-3. Enter a name identifying the remote machine (e.g. `nas-box`, `media-server`, `pi4`). This name is for your reference; the agent's actual hostname is sent on first connect.
-4. Click **Generate token**.
-5. Copy the command shown — you'll need it on the remote machine.
-
-> The token is shown **once** at generation time. It is not stored in plaintext anywhere and cannot be retrieved after you close this dialog. If you lose it, revoke it and generate a new one.
-
-### Step 2 — run the agent
-
-Copy the command from the UI and run it on your remote machine. It takes this form:
+### 2. Run the agent on the remote machine
 
 ```sh
-aperture-agent \
-  --hub http://your-hub-ip:8080 \
-  --token <generated-token>
+aperture-agent --hub http://your-hub:8080 --token <token>
 ```
 
-The agent binary needs to be on the remote host. Options:
+Get the binary onto the remote host either by building locally (`go build -o aperture-agent ./cmd/agent`) or scp-ing it from the hub machine. The host appears in the dashboard within seconds.
 
-**A. Build on the remote host** (requires Go):
-```sh
-git clone <repo> aperture && cd aperture
-go build -o aperture-agent ./cmd/agent
-./aperture-agent --hub http://hub-ip:8080 --token <token>
-```
+### Agent flags
 
-**B. Copy from the hub machine**:
-```sh
-scp hub-machine:/opt/aperture/bin/aperture-agent remote-host:/usr/local/bin/
-ssh remote-host aperture-agent --hub http://hub-ip:8080 --token <token>
-```
-
-The remote host appears in the Hosts dashboard within a few seconds of connecting.
-
-### Agent configuration
-
-| Flag | Default | Description |
+| Flag | Default | Notes |
 |---|---|---|
-| `--hub` | *(required)* | Full URL of the hub, e.g. `http://192.168.1.10:8080`. Use `https://` if the hub is behind a TLS-terminating proxy. |
-| `--token` | *(required)* | Token generated via Settings → + Add agent. |
-| `--name` | machine hostname | Override the hostname reported to the hub. Useful if your hostname is not human-friendly (e.g. `raspberrypi`). |
-| `--interval` | `5s` | Metric sample interval. Increase to `30s` on low-power devices. |
-| `--disk` | `/` | Filesystem path to report disk usage for. Set to your main data volume if it isn't `/`. |
-| `--no-docker` | false | Disable docker collection even if the socket is available. Container management for this host will be unavailable. |
+| `--hub` | *(required)* | Full URL of the hub. `https://` if behind TLS termination. |
+| `--token` | *(required)* | From the Settings UI. |
+| `--name` | hostname | Override the name reported to the hub. |
+| `--interval` | `5s` | Sample cadence. Hub-supplied `host_config.sample_interval_s` overrides this at runtime. |
+| `--disk` | `/` | Mount point to report disk usage for. |
+| `--no-docker` | false | Disable Docker collection on this host. |
 
-**Example — NAS with data on /mnt/storage:**
-```sh
-aperture-agent \
-  --hub http://192.168.1.10:8080 \
-  --token eyJhbGci... \
-  --name nas-box \
-  --disk /mnt/storage
-```
-
-**Example — Raspberry Pi, no docker, 15s interval:**
-```sh
-aperture-agent \
-  --hub http://192.168.1.10:8080 \
-  --token eyJhbGci... \
-  --name pi4 \
-  --interval 15s \
-  --no-docker
-```
-
-#### Reconnection behavior
-
-The agent reconnects automatically if the connection drops, using exponential backoff:
-- First retry: 2 seconds
-- Each subsequent retry doubles (2s → 4s → 8s → … → 60s cap)
-- Once reconnected, the host's data resumes immediately
-
-The hub shows the host as **stale** (amber) after 15 seconds without a heartbeat, and **offline** (red) after 90 seconds. This is display-only — the data is preserved and resumes when the agent reconnects.
+The agent **receives** its monitoring config from the hub at connect time and on every UI edit — you don't need flags for which families to collect, threshold values, or filters. Those live in `host_config`.
 
 ### Agent as a systemd service
 
-Create `/etc/systemd/system/aperture-agent.service` on the remote host:
+`/etc/systemd/system/aperture-agent.service`:
 
 ```ini
 [Unit]
@@ -389,16 +184,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=aperture-agent
-Group=aperture-agent
 ExecStart=/usr/local/bin/aperture-agent \
   --hub http://192.168.1.10:8080 \
   --token YOUR_TOKEN_HERE \
-  --name nas-box \
-  --disk /mnt/storage
+  --name nas-box
 Restart=always
 RestartSec=5s
-
-# Add to docker group if you want container management on this host:
 SupplementaryGroups=docker
 
 [Install]
@@ -406,393 +197,247 @@ WantedBy=multi-user.target
 ```
 
 ```sh
-# Create a minimal user for the agent
 sudo useradd -r -s /sbin/nologin aperture-agent
-
-# Add to docker group (if needed)
-sudo usermod -aG docker aperture-agent
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable --now aperture-agent
-sudo journalctl -u aperture-agent -f
+sudo usermod -aG docker aperture-agent  # if you want container management
+sudo systemctl daemon-reload && sudo systemctl enable --now aperture-agent
 ```
 
-### Agent in Docker
+### Reconnection
 
-The agent can run in a container on the remote host. It needs access to the Docker socket to manage containers:
-
-```sh
-docker run -d \
-  --name aperture-agent \
-  --restart unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  ghcr.io/aperture/agent:latest \
-  --hub http://192.168.1.10:8080 \
-  --token YOUR_TOKEN_HERE \
-  --name nas-box
-```
-
-> **Note:** The Docker image is not published yet. Build locally: `docker build -f Dockerfile.agent -t aperture-agent .`
-
-If you want the agent to report disk usage for a path outside the container (e.g. your NAS storage), mount it read-only and set `--disk`:
-
-```sh
-docker run -d \
-  --name aperture-agent \
-  --restart unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /mnt/storage:/mnt/storage:ro \
-  ghcr.io/aperture/agent:latest \
-  --hub http://192.168.1.10:8080 \
-  --token YOUR_TOKEN_HERE \
-  --disk /mnt/storage
-```
+Exponential backoff (2s → 60s cap). The hub marks hosts **offline** after ~30s with no sample (configurable via `host_config.sample_interval_s` — threshold is `max(2× interval, 30s)`). Historical data is preserved across disconnects.
 
 ### Token management
 
-Tokens are managed at **Settings → Agent tokens**.
+**Settings → Agent tokens** lists name, created-at, last-used. Revoking immediately disconnects any agent using that token. Tokens are 32 bytes of random data; only the SHA-256 hash is stored.
 
-| Column | Notes |
-|---|---|
-| Name | The label you gave the token when you generated it. |
-| Created | When the token was generated. |
-| Last used | When the agent last authenticated (updates on WS connect). |
-| Revoke | Immediately invalidates the token. Any agent using it will disconnect and be unable to reconnect until a new token is issued. |
+---
 
-**Rotating a token:**
-1. Generate a new token for the same machine.
-2. Update the agent's `--token` flag (update systemd unit or docker run command).
-3. Restart the agent.
-4. Revoke the old token once the agent reconnects with the new one.
+## Per-host monitoring config
 
-**Security notes:**
-- Tokens are 32 bytes of cryptographically random data (256 bits of entropy).
-- Only the SHA-256 hash is stored in the database — the hub cannot recover a plaintext token.
-- Tokens are sent over the WebSocket upgrade HTTP request as a `Bearer` header. Use HTTPS/TLS termination at the reverse proxy layer if the hub is accessible over an untrusted network.
+Each host has a `host_config` row driving what it monitors and when status flips. Edit via **Hosts → {host} → Settings tab** in the UI, or via the API.
+
+| Field | Default | Notes |
+|---|---|---|
+| `sample_interval_s` | 5 | Pushed to the agent / applied to the local collector live. |
+| `enabled_families` | all on | `cpu`, `cpu_per_core`, `mem`, `disk`, `mounts`, `disk_io`, `net`, `load`, `uptime`, `temps`, `processes`, `containers`. Disable a family to stop collecting it entirely. |
+| `mem_calc` | `used` | `avail` mode uses `MemAvailable` (matches htop). Useful on hosts with heavy page cache. |
+| `filters.nic_allow` / `nic_deny` | `[]` | Allow/deny lists for network interfaces. Deny wins. |
+| `filters.sensor_allow` / `sensor_deny` | `[]` | Same for temperature sensors. |
+| `filters.mount_allow` / `mount_deny` | `[]` | Same for filesystem mounts. |
+| `retention_days` | 30 | Default retention. |
+| `retention_overrides` | `{}` | Per-table retention in days, e.g. `{"process_metrics": 3}` to keep process history short. |
+| `warn_cpu` / `crit_cpu` etc. | 70 / 90 (CPU, mem, disk); 70 / 85 (temp) | Drive the host status flip (`ok` → `warn` → `crit`). |
+
+Hosts without a row use **global defaults** edited in **Settings → Monitoring defaults**. The hardcoded fallbacks are the values above.
+
+### Optional family scaffolds
+
+`smart` (disk health), `gpu`, `battery`, `systemd` are registered in the catalog as `experimental:true` and return "not implemented" today. The seam in `internal/collector/families/` is in place so each is a single new file when implemented.
 
 ---
 
 ## Alerts
 
-Alerts are configured at **Alerts → Rules**.
+**Alerts → Rules → New rule**.
 
-### Creating a rule
+The metric picker is two-step:
+1. **Category**: `simple` (host-wide scalar), `iface` (per network interface), `mount` (per filesystem), `temp` (per sensor), `proc` (per process name), `host` (host status).
+2. **Target + leaf** (for dotted categories): e.g. category=`iface`, target=`eth0`, leaf=`rx_rate` builds `iface.eth0.rx_rate`.
 
-| Field | Description |
+Supported scalar metrics: `cpu_pct`, `mem_pct`, `disk_pct`, `swap_pct`, `load_1/5/15`, `temp.max` (hottest sensor), `host.status` (encoded `ok=0`, `warn=1`, `crit=2`, `offline=3`).
+
+Operators: `>`, `>=`, `<`, `<=`, `==`, `!=`.
+
+```
+Example rules:
+  cpu_pct                > 90 for 60s     → warning
+  mount./.pct            > 85 for 5m      → warning
+  iface.eth0.rx_rate     > 1048576 for 30s → warning   (1 MiB/s sustained)
+  proc.nginx.cpu_pct     > 50 for 30s     → warning
+  temp.max               > 80 for 60s     → critical
+  host.status            == 3 for 120s    → critical   (host offline)
+```
+
+Rules with `host_id` set are scoped to one host; rules with `host_id: null` apply globally.
+
+### Templates
+
+**Alerts → Apply template** lets you seed a rule set in one click:
+
+| Template | Rules |
 |---|---|
-| Host | Specific host, or "all hosts" to apply everywhere. |
-| Metric | `cpu_pct`, `mem_pct`, `disk_pct`, `swap_pct`, `load1` |
-| Operator | `>`, `>=`, `<`, `<=` |
-| Threshold | Numeric value (percentages as 0–100, load as raw). |
-| Duration | Breach must be sustained for this many seconds before firing. `0` = fire immediately. |
-| Severity | `info`, `warning`, `critical` — used for per-channel filtering. |
+| **Beszel defaults** | CPU>90/60s warn, Mem>90/60s warn, Disk>85/5m warn, temp.max>80/60s critical, host.status==offline/2m critical |
+| **Aggressive** | Same metrics, lower thresholds, shorter durations |
+| **Quiet** | Same metrics, higher thresholds, longer durations |
 
-Rules evaluate on every metric ingest. An event fires when the threshold is crossed for the full duration. It auto-resolves when the metric returns below the threshold and a new sample arrives.
-
-**Example rules:**
-- CPU above 80% for 60 seconds → warning
-- Disk above 90% for 0 seconds → critical (fires immediately)
-- Load average above 4.0 for 120 seconds → warning
+Apply is idempotent — duplicate `(metric, op, threshold)` rules are skipped.
 
 ### Notification channels
 
-Channels are configured at **Alerts → Channels**.
+Configure at **Alerts → Channels**. Each channel has a minimum-severity filter and a notify-on-resolve toggle.
 
-Each channel has:
-- **Type** — Discord, Slack, ntfy, Gotify, or Webhook.
-- **Minimum severity** — only notify for rules at or above this level. Set a critical-only channel for your phone and an info+ channel for a low-noise logging destination.
-- **Notify on resolve** — send a follow-up notification when the alert auto-resolves.
-- **Test button** — sends a synthetic test notification immediately to verify the config.
-
-#### Discord
-
-Paste your Discord webhook URL (Channel Settings → Integrations → Webhooks).
-
-Notifications are sent as rich embeds with severity-coded colors:
-- Critical → red
-- Warning → orange
-- Info → blue
-- Resolved → green
-
-#### Slack
-
-Paste the Incoming Webhook URL from your Slack app configuration.
-
-#### ntfy
-
-| Field | Description |
+| Type | What you paste |
 |---|---|
-| Server URL | `https://ntfy.sh` for the public server, or your self-hosted instance URL. |
-| Topic | The topic name (e.g. `homelab-alerts`). Keep this private — anyone who knows the topic can subscribe. |
-| Token | Bearer token if your ntfy server requires auth. Leave blank for public topics. |
-| Priority | Override the default priority mapping. Leave blank to use auto (critical=urgent, warning=high, info=default, resolved=low). |
+| **discord** | Discord webhook URL (Channel Settings → Integrations → Webhooks) |
+| **slack** | Slack incoming-webhook URL |
+| **ntfy** | Server URL, topic, optional token + priority |
+| **gotify** | Server URL + app token |
+| **shoutrrr** | Raw [Shoutrrr URL](https://containrrr.dev/shoutrrr/services/overview/) — unlocks Telegram, Matrix, Pushover, Teams, Mattermost, Rocketchat, OpsGenie, IFTTT, Pushbullet, Bark, Join, Lark, WeCom, Zulip, and more |
+| **webhook** | Generic POST URL with custom headers — gets the alert payload as JSON |
 
-#### Gotify
-
-| Field | Description |
-|---|---|
-| Server URL | Your Gotify server, e.g. `https://gotify.example.com`. |
-| App Token | The token from your Gotify app. |
-| Priority | Custom priority. Leave `0` to use auto (critical=10, warning=5, info=1, resolved=2). |
-
-#### Generic webhook
-
-Posts a JSON payload to any URL. Useful for Home Assistant, n8n, Zapier, custom scripts, etc.
-
-| Field | Description |
-|---|---|
-| URL | Target URL. |
-| Method | `POST` (default) or `GET`. |
-| Headers | Custom HTTP headers as key:value pairs. |
-
-Payload shape:
-```json
-{
-  "type": "alert_fired",
-  "host": { "id": "...", "name": "nas-box", ... },
-  "rule": { "metric": "disk_pct", "op": ">", "threshold": 90, "severity": "critical" },
-  "event": { "id": 42, "fired_at": "2026-05-09T14:30:00Z", "value": 93.5 },
-  "resolved_at": null
-}
-```
-When resolved, `"type"` is `"alert_resolved"` and `"resolved_at"` is an ISO timestamp.
+The discord/slack/ntfy/gotify legacy types route through Shoutrrr internally. Their stored config rows are translated to Shoutrrr URLs at send time — no migration needed if you already had channels.
 
 ---
 
 ## API reference
 
-All endpoints are under `/api`. Responses are JSON.
+All endpoints are under `/api`. Auth required via `aperture_session` cookie except `/api/health`, `/api/auth/*`, and `/api/agents/ws`.
 
-### Authentication
+### Auth
 
-| Method | Path | Description |
+| Method | Path | Notes |
 |---|---|---|
-| GET | `/api/auth/status` | Returns `{configured, authenticated}`. Used by the layout to decide whether to redirect to `/setup` or `/login`. |
-| POST | `/api/auth/setup` | First-run only. Body: `{"password":"..."}`. Sets the admin password (bcrypt, cost 12) and creates a session. Returns 409 if a password is already set. |
-| POST | `/api/auth/login` | Body: `{"password":"..."}`. Validates the password and sets a 24-hour HttpOnly session cookie. |
-| POST | `/api/auth/logout` | Deletes the session and clears the cookie. |
-| POST | `/api/auth/change-password` | Body: `{"current":"...","new":"..."}`. Verifies the current password then re-hashes. |
+| GET | `/api/auth/status` | `{configured, authenticated}` |
+| POST | `/api/auth/setup` | First-run only. `{password}` → session cookie. |
+| POST | `/api/auth/login` | `{password}` → session cookie (24h). |
+| POST | `/api/auth/logout` | Clears the session. |
+| POST | `/api/auth/change-password` | `{current, new}` |
 
-All endpoints except `/api/health`, `/api/auth/*`, and `/api/agents/ws` require a valid session cookie (`aperture_session`). Unauthenticated requests receive `401 {"error":"..."}`.
+### Monitoring (v0.4.1 spine)
 
-### System
-
-| Method | Path | Description |
+| Method | Path | Notes |
 |---|---|---|
-| GET | `/api/health` | Liveness probe. Returns `{"ok":true}`. |
-| GET | `/api/system/info` | Version, started-at, DB path, and DB size on disk (includes WAL). |
+| GET | `/api/monitoring/overview` | Hosts + latest sample + container counts + open-alert counts + status. One call replaces the dashboard's N+1 fan-out. |
+| GET | `/api/monitoring/catalog` | Families, scalar metrics, alert categories+leaves, rule templates. Single source of truth for UI pickers. |
+| GET | `/api/hosts/{id}/monitoring/bundle?range=1h&points=300[&include=metrics,net,mounts,diskio,temps,cpu]` | Host + latest + config + all history series + open alerts in one response. Drives the host-detail tabs. |
+| GET / PUT | `/api/hosts/{id}/config` | Per-host monitoring policy (see [Per-host monitoring config](#per-host-monitoring-config)). PUT pushes to the running collector/agent. |
+| GET / PUT | `/api/settings/monitoring-defaults` | Global defaults applied to hosts without their own row. |
+| GET | `/api/stream/metrics` | SSE stream. Typed envelope `{type, hostId, ts, ...}` — `type` ∈ `metric` / `host_status` / `container_summary` / `alert`. |
 
-### Hosts
+### Per-metric history (single-chart drill-ins)
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/hosts` | All registered hosts (local + agents). |
-| GET | `/api/hosts/{id}` | One host. |
-| GET | `/api/hosts/{id}/metrics/latest` | Most recent sample — includes live-only rich fields (per-core CPU, net interfaces, disk mounts, disk I/O, temps, processes). |
-| GET | `/api/hosts/{id}/metrics?range=1h&points=300` | Downsampled historical aggregate samples. `range`: any Go duration. `points`: max rows returned (uniform stride). |
-| GET | `/api/hosts/{id}/metrics/net?range=1h&points=300` | Historical per-interface byte counters. |
-| GET | `/api/hosts/{id}/metrics/mounts?range=1h&points=300` | Historical per-mount used/total bytes. |
-| GET | `/api/hosts/{id}/metrics/diskio?range=1h&points=300` | Historical per-device read/write byte counters. |
+| Method | Path |
+|---|---|
+| GET | `/api/hosts/{id}/metrics?range=&points=` (aggregate) |
+| GET | `/api/hosts/{id}/metrics/latest` (live snapshot with rich fields) |
+| GET | `/api/hosts/{id}/metrics/net?range=&points=` (per-interface) |
+| GET | `/api/hosts/{id}/metrics/mounts?range=&points=` (per-mount) |
+| GET | `/api/hosts/{id}/metrics/diskio?range=&points=` (per-device) |
+| GET | `/api/hosts/{id}/metrics/temps?range=&points=` (per-sensor) |
+| GET | `/api/hosts/{id}/metrics/cpu?range=&points=` (per-core + aggregate) |
+| GET | `/api/hosts/{id}/metrics/procs?name=X&range=&points=` (one process by name) |
+| GET | `/api/hosts/{id}/containers/{cid}/metrics?range=&points=` (per-container CPU/mem/net) |
 
 ### Containers
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/hosts/{id}/containers?all=true` | List containers. `all=false` returns running only. |
-| POST | `/api/hosts/{id}/containers` | Create container. Body: `{image, name?, restart_policy?, env?, ports?, volumes?, auto_start}`. |
-| GET | `/api/hosts/{id}/containers/{cid}/inspect` | Full container detail: config, env, ports, mounts, labels, live stats, resource limits. |
-| PUT | `/api/hosts/{id}/containers/{cid}/resources` | Update CPU/memory limits live. Body: `{nano_cpus?, memory_bytes?}`. `0` = unlimited. |
-| POST | `/api/hosts/{id}/containers/{cid}/recreate` | Stop → remove → recreate from same spec. |
-| POST | `/api/hosts/{id}/containers/{cid}/start` | Start. Also: `stop`, `restart`, `pause`, `unpause`, `kill?signal=SIGTERM`. |
-| DELETE | `/api/hosts/{id}/containers/{cid}?force=false&volumes=false` | Remove. |
-| GET | `/api/hosts/{id}/containers/{cid}/logs?tail=200` | Container logs (plaintext). |
+| Method | Path |
+|---|---|
+| GET | `/api/hosts/{id}/containers?all=true` |
+| POST | `/api/hosts/{id}/containers` |
+| GET | `/api/hosts/{id}/containers/{cid}/inspect` |
+| PUT | `/api/hosts/{id}/containers/{cid}/resources` |
+| POST | `/api/hosts/{id}/containers/{cid}/{start,stop,restart,pause,unpause,kill,recreate}` |
+| DELETE | `/api/hosts/{id}/containers/{cid}?force=&volumes=` |
+| GET | `/api/hosts/{id}/containers/{cid}/logs?tail=` |
 
 ### Alerts
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/alerts/metadata` | Available metrics, operators, severities, channel types. |
-| GET | `/api/alerts/rules?host_id=` | List rules. Omit `host_id` for all rules. |
-| POST | `/api/alerts/rules` | Create rule. Body: `{host_id?, metric, op, threshold, duration_s, enabled, severity}`. |
-| GET | `/api/alerts/rules/{id}` | Get one rule. |
-| PUT | `/api/alerts/rules/{id}` | Update rule (full replace). |
-| DELETE | `/api/alerts/rules/{id}` | Delete rule. Cascades to events and clears evaluator state. |
-| GET | `/api/alerts/events?host_id=&open=true&limit=200` | Event history. `open=true` = currently firing only. |
-| GET | `/api/alerts/channels` | List notification channels. |
-| POST | `/api/alerts/channels` | Create channel. |
-| GET | `/api/alerts/channels/{id}` | Get one channel. |
-| PUT | `/api/alerts/channels/{id}` | Update channel. |
-| DELETE | `/api/alerts/channels/{id}` | Delete channel. |
-| POST | `/api/alerts/channels/{id}/test` | Send a test notification immediately. Returns `{"ok":true}` or `{"error":"..."}`. |
+| Method | Path |
+|---|---|
+| GET | `/api/alerts/metadata` — supported metrics, categories+leaves, ops, severities, channel types |
+| GET / POST | `/api/alerts/rules?host_id=` |
+| GET / PUT / DELETE | `/api/alerts/rules/{id}` |
+| POST | `/api/alerts/templates/apply` — `{template:"Beszel defaults", host_id:null|"id"}` |
+| GET | `/api/alerts/events?host_id=&open=true&limit=` |
+| GET / POST | `/api/alerts/channels` |
+| GET / PUT / DELETE | `/api/alerts/channels/{id}` |
+| POST | `/api/alerts/channels/{id}/test` |
 
 ### Agent tokens
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/agents/tokens` | List all non-revoked tokens (names, created, last-used — no plaintext). |
-| POST | `/api/agents/tokens` | Create token. Body: `{"name":"my-machine"}`. Returns the struct with `token` field set — **only time the plaintext is returned**. |
-| DELETE | `/api/agents/tokens/{id}` | Revoke token. Connected agents using it disconnect immediately. |
-| GET | `/api/agents/connected` | List host IDs of currently connected agents. |
-| GET | `/api/agents/ws` | WebSocket endpoint for agent connections (not for direct use; see agent binary). |
+| Method | Path |
+|---|---|
+| GET | `/api/agents/tokens` |
+| POST | `/api/agents/tokens` — `{name}` returns plaintext token **once** |
+| DELETE | `/api/agents/tokens/{id}` |
+| GET | `/api/agents/connected` |
+| GET | `/api/agents/ws` (agent WebSocket endpoint) |
 
 ---
 
 ## Development setup
 
-### Backend
-
 ```sh
-# Run the hub with a short sample interval for faster feedback
-# -tags dev enables the CORS middleware for localhost origins (required for Vite dev server)
-go run -tags dev ./cmd/hub -interval 2s
-
-# Or use the Makefile target (automatically passes -tags dev)
+# Terminal 1 — hub with -tags dev (enables CORS for the Vite dev server)
 make dev
+
+# Terminal 2 — frontend with hot reload
+cd web && npm install && npm run dev
 ```
 
-The `-tags dev` build tag activates the CORS middleware that allows cross-origin requests from `localhost`/`127.0.0.1` origins with credentials. Without it, the session cookie cannot be sent from the Vite dev server to the hub.
+Open `http://localhost:5173`. First run redirects to `/setup` for password creation.
 
-### Frontend
+The `-tags dev` build tag activates the CORS middleware that allows cross-origin requests from `localhost`/`127.0.0.1` origins with credentials. Without it, the session cookie is rejected.
 
-```sh
-cd web
-npm install
-npm run dev      # Vite dev server on :5173, proxies API to :8080
-```
-
-The Vite dev server auto-sets `VITE_API_BASE=http://localhost:8080`.
-
-### Both together
-
-Terminal 1:
-```sh
-make dev   # hub on :8080, with -tags dev for CORS
-```
-
-Terminal 2:
-```sh
-cd web && npm run dev   # SPA on :5173
-```
-
-Open `http://localhost:5173` for live-reload development. On first run you'll be redirected to `/setup` to create a password.
-
-### Project layout
+### Project layout (high-level)
 
 ```
-aperture/
-├── cmd/
-│   ├── hub/            Hub binary (main.go)
-│   └── agent/          Agent binary (main.go)
-├── internal/
-│   ├── agentproto/     Shared agent ↔ hub WebSocket frame types
-│   ├── alerts/         Threshold evaluator + notification senders
-│   │   ├── alerts.go   Evaluator: sustained-breach detection, auto-resolve
-│   │   ├── notify.go   Notifier: dispatch to channels, severity filtering
-│   │   ├── ch_discord.go
-│   │   ├── ch_slack.go
-│   │   ├── ch_ntfy.go
-│   │   ├── ch_gotify.go
-│   │   └── ch_webhook.go
-│   ├── api/            HTTP handlers + chi router + auth middleware
-│   ├── collector/      gopsutil-based local metric sampler
-│   ├── dockerctl/      Docker SDK wrapper
-│   ├── hub/            Orchestration + AgentHandler + TerminalProvider
-│   ├── store/          SQLite store + schema
-│   └── types/          Shared Go types
-├── web/                SvelteKit 5 frontend
-│   └── src/
-│       ├── lib/        Shared components, API client, types, format utils
-│       └── routes/     Pages: /, /hosts/[id], /hosts/[id]/containers,
-│                               /alerts, /settings
-├── Makefile
-├── README.MD           This file
-├── overview.md         Internal feature + architecture overview
-├── technical.md        Per-function implementation detail
-└── changelog.md        Versioned change log
+cmd/{hub,agent}      Binaries
+internal/
+├── agentproto       Hub ↔ agent WebSocket frame types (TypeConfig pushes host policy)
+├── alerts           Evaluator + StatusProvider + Shoutrrr dispatcher + templates
+├── api              chi router + monitoring spine + auth + middleware
+├── collector        gopsutil collector + family scaffolds (internal/collector/families/)
+├── dockerctl        Docker SDK wrapper
+├── hub              Orchestration: ingest loop, SSE broadcast, retention, offline watchdog
+├── store            SQLite store + schema (host_config + metric history tables)
+└── types            Shared Go types
+web/src/
+├── lib/             Components, monitoring store, metric catalog, api client
+└── routes/          dashboard, /hosts/[id] (10 tabs), /alerts, /settings, /containers, /stacks, ...
 ```
+
+`docs/changelog.md` has the full per-release change log. `docs/technical.md` has per-function implementation detail. `docs/overview.md` has the feature roadmap.
 
 ---
 
 ## Troubleshooting
 
-### Hub
+**`docker unavailable` on startup.** The hub user can't reach the Docker socket. Fix: `sudo usermod -aG docker $USER && newgrp docker`. Metrics still work without it — only container endpoints fail.
 
-**`docker unavailable` on startup**
-The user running the hub cannot reach the Docker socket. Fix:
-```sh
-sudo usermod -aG docker $USER
-# then log out and back in, or: newgrp docker
-```
-Metrics continue to work; only container endpoints are affected.
+**Charts show no data.** Charts need ≥ 2 samples in the range. Wait one or two sample intervals, or pick a longer range.
 
-**Charts show no data**
-Charts require at least 2 samples in the requested time range. Wait one or two `-interval` cycles after starting. The "15m" range means the last 15 minutes of stored data — if the hub just started, switch to a longer range or wait.
+**Database growing large.** Cap retention globally via `-retain` or per-host via `host_config.retention_days` + `retention_overrides`. To reclaim space immediately: stop the hub and `sqlite3 aperture.db "VACUUM;"`.
 
-**Port already in use**
-```sh
-./bin/aperture-hub -listen :8081 -web-dir web/build
-```
+**CORS errors in dev.** Run the hub via `make dev` (passes `-tags dev`). Without it the CORS middleware is compiled out.
 
-**Database growing large**
-Set a shorter retention period:
-```sh
-./bin/aperture-hub -retain 72h -web-dir web/build
-```
-The pruner runs every hour. To reclaim space immediately, stop the hub and run:
-```sh
-sqlite3 aperture.db "VACUUM;"
-```
+**Agent says `unauthorized`.** Token was revoked or wrong. Generate a new one in Settings.
 
-**CORS errors in dev**
-Make sure the hub is running with `make dev` (which passes `-tags dev`). Without that build tag the CORS middleware is compiled out and the browser rejects cross-origin requests from the Vite dev server. Also confirm you opened `http://localhost:5173`, not `:8080` directly.
+**Agent stays offline after connect.** Check `curl http://hub-ip:8080/api/health` from the agent machine. If using a hostname, verify DNS resolution.
 
-### Agent
+**Host detail page making thousands of requests.** This was a v0.4.1 regression that's been fixed — if you somehow still see it, you're running an unfixed build of `hosts/[id]/+page.svelte`. Rebuild from current source.
 
-**Agent won't connect — `unauthorized`**
-The token was revoked, or the wrong token was used. Generate a new one in Settings.
+**High CPU on agent machine.** Either lower its sample interval (UI → host → Settings → Sample interval) or disable expensive families (processes, cpu_per_core).
 
-**Agent connects but shows as offline immediately**
-The hub address in `--hub` is reachable from the agent (try `curl http://hub-ip:8080/api/health` from the agent machine). If using a hostname, verify DNS resolution.
-
-**No docker tab / container management unavailable for an agent host**
-Either the agent was started with `--no-docker`, or docker is not installed/running on the agent machine, or the agent user doesn't have socket access. Check:
-```sh
-# On the agent machine:
-docker ps   # if this fails, fix docker permissions
-# Then restart the agent without --no-docker
-```
-
-**Agent reporting wrong disk usage**
-Use `--disk /path/to/your/storage` to point at the mount you care about. The default `/` reports the root filesystem.
-
-**High CPU on agent machine**
-Increase `--interval`:
-```sh
-aperture-agent --hub ... --token ... --interval 30s
-```
-
-**Can't see historical data after agent reconnects**
-Historical data is preserved in the hub's SQLite DB across disconnections. Only the in-memory live snapshot is cleared on disconnect. Once the agent reconnects and sends a sample, the live data (per-core CPU, process list, etc.) reappears.
+**Want different metrics on a card.** Click the `⋯` menu on a host card → **Configure widget…** → pick up to 4 from the metric catalog. Persisted per-host in localStorage + dashboard layout.
 
 ---
 
 ## Roadmap
 
-Phase 1 (Solidify the Core) is done. Planned phases, in rough order:
+Phase 4 (monitoring depth + Beszel parity + remote-host expansion) is **done** with v0.4.1. Planned next:
 
 | Phase | Focus |
 |---|---|
-| 2 | **Compose-first workflow** — discover, import, edit, and deploy `docker-compose.yml` stacks from the UI; git-style version diffs and rollback |
-| 3 | **Deep docker** — network topology, volume management, image update detection, log streaming (Dozzle replacement) |
-| 4 | **Metrics depth** — ZFS pools, SMART per-drive, RAID status, NFS/SMB mounts, container-level metrics, retention tiers |
-| 5 | **Alerting depth** — container state alerts, storage alerts, agent-offline detection, cooldown/dedup, ack/silence, escalation |
-| 6 | **Network** — subnet scanning, device inventory, OPNsense integration, WireGuard/OpenVPN tunnel status, topology map |
-| 7 | **Ansible** — playbook discovery, in-app editor, run against agent inventory, streaming output, execution history |
-| 8 | **Auth & multi-user** — Traefik/Caddy reverse proxy integration, RBAC, sessions + 2FA, optional OIDC/LDAP |
+| 5 | **Alerting depth** — cooldown / dedup, ack / silence, escalation chains, agent-side rule offload for high-frequency metrics |
+| 6 | **Container & stack management refresh** — Portainer/Dockge parity polish; compose-stack metrics on the host detail page |
+| 7 | **Network** — subnet scanning, device inventory, OPNsense integration, WireGuard/OpenVPN tunnel status, topology map |
+| 8 | **Ansible** — playbook discovery, in-app editor, run against agent inventory, streaming output, execution history |
+| 9 | **Optional families implementation** — SMART (smartctl), GPU (nvidia-smi/AMD sysfs/Intel), battery, systemd unit health |
+| 10 | **Auth & multi-user** — reverse-proxy header trust, RBAC, OIDC/LDAP |
 
-**Architecture goals locked in from day 1:**
-- API-first: every UI action is an API call; the API is the product.
-- Agent capabilities reporting: ZFS available? Ansible installed? Hub surfaces and disables irrelevant tabs automatically.
-- Pluggable providers for notification channels, proxy integrations, metric collectors.
-- mTLS as a future upgrade path for agent authentication (token auth is the Phase 1 baseline).
+Architecture invariants we intend to keep:
+- API-first: every UI action is an API call.
+- Agent receives config from the hub — no per-agent flags for what to monitor.
+- Pluggable collector families, alert channels (via Shoutrrr), and notification formats.
+- mTLS as a future upgrade path for agent auth.

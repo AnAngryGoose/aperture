@@ -29,7 +29,7 @@ import (
 
 // Version identifies the running binary. Bump alongside changelog entries.
 // Surfaced via /api/system/info and the layout footer.
-const Version = "0.4.0-alpha.2"
+const Version = "0.4.1-alpha.1"
 
 func main() {
 	var (
@@ -66,6 +66,10 @@ func main() {
 		os.Exit(1)
 	}
 	h.SetEvaluator(ev)
+	// Wire the status provider so `host.status` rules can resolve their
+	// metric. Without this, evaluator.resolveMetric short-circuits and the
+	// rule silently no-ops.
+	ev.SetStatusProvider(h.LatestStatus)
 
 	notif := alerts.NewNotifier(st, log)
 	ev.SetNotifier(notif)

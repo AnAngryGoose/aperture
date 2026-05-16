@@ -71,8 +71,29 @@ func TestMetricValueDotted(t *testing.T) {
 	}
 }
 
+func TestStatusToFloat(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   float64
+		wantOK bool
+	}{
+		{"ok", 0, true},
+		{"warn", 1, true},
+		{"crit", 2, true},
+		{"offline", 3, true},
+		{"bogus", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := StatusToFloat(c.in)
+		if ok != c.wantOK || (ok && got != c.want) {
+			t.Errorf("StatusToFloat(%q) = %v, %v; want %v, %v", c.in, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
 func TestValidateRule(t *testing.T) {
-	good := []string{"cpu_pct", "mem_pct", "iface.eth0.rx_rate", "mount./.pct", "temp.cpu.value", "proc.nginx.cpu_pct"}
+	good := []string{"cpu_pct", "mem_pct", "iface.eth0.rx_rate", "mount./.pct", "temp.cpu.value", "proc.nginx.cpu_pct", "host.status", "temp.max"}
 	for _, m := range good {
 		r := types.AlertRule{Metric: m, Op: ">", Threshold: 1}
 		if err := ValidateRule(r); err != nil {

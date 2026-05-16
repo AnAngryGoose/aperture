@@ -33,13 +33,39 @@ import (
 	"github.com/aperture/aperture/internal/types"
 )
 
+// StatusProvider returns the latest host status string ("ok"|"warn"|"crit"|"offline")
+// for the given host. Used by the evaluator to resolve `host.status` metric
+// rules — those don't come from MetricSample, they come from the hub's
+// derived status. Hub.LatestStatus satisfies this.
+type StatusProvider func(hostID string) string
+
+// StatusToFloat encodes a host status string for numeric comparison in the
+// existing threshold pipeline. ok=0 (best), offline=3 (worst). A rule like
+// `host.status >= 2` fires for crit or offline. A rule like
+// `host.status == 3` fires only for offline. Symmetric mapping in the UI
+// surfaces a dropdown instead of a free-form number.
+func StatusToFloat(status string) (float64, bool) {
+	switch status {
+	case "ok":
+		return 0, true
+	case "warn":
+		return 1, true
+	case "crit":
+		return 2, true
+	case "offline":
+		return 3, true
+	}
+	return 0, false
+}
+
 // Evaluator runs all enabled rules against incoming samples and persists
 // alert_events transitions (fire / resolve).
 type Evaluator struct {
-	store    *store.Store
-	log      *slog.Logger
-	notifier *Notifier // nil-safe; set via SetNotifier before Run
-	mu       sync.Mutex
+	store          *store.Store
+	log            *slog.Logger
+	notifier       *Notifier      // nil-safe; set via SetNotifier before Run
+	statusProvider StatusProvider // nil-safe; set via SetStatusProvider
+	mu             sync.Mutex
 	// pending tracks the first time a rule's breach condition was observed,
 	// per host. Cleared when the breach ends (resolves) or when the event
 	// fires (moves to "open"). Used to enforce sustained-duration semantics.
@@ -63,6 +89,10 @@ type Evaluator struct {
 // SetNotifier wires in a Notifier so fired/resolved events are dispatched to
 // configured channels. Must be called before the first Evaluate call.
 func (e *Evaluator) SetNotifier(n *Notifier) { e.notifier = n }
+
+// SetStatusProvider wires in the host-status lookup so `host.status` rules
+// can be evaluated. Without it those rules silently no-op.
+func (e *Evaluator) SetStatusProvider(p StatusProvider) { e.statusProvider = p }
 
 type ruleHostKey struct {
 	ruleID int64
@@ -164,7 +194,7 @@ func (e *Evaluator) Invalidate() {
 }
 
 func (e *Evaluator) evalOne(ctx context.Context, r types.AlertRule, sample types.MetricSample) {
-	val, ok := MetricValue(sample, r.Metric)
+	val, ok := e.resolveMetric(sample, r.Metric)
 	if !ok {
 		// Unknown metric in a rule. Log once and bail; misconfigured rules
 		// shouldn't burn CPU but they also shouldn't crash anything.
@@ -213,6 +243,43 @@ func (e *Evaluator) evalOne(ctx context.Context, r types.AlertRule, sample types
 				go e.notifier.Dispatch(ctx, resolvedEv, r, true)
 			}
 		}
+	}
+}
+
+// resolveMetric extends MetricValue with metric names that need data from
+// outside the sample — currently just `host.status`, which is sourced from
+// the hub's derived status map via the registered StatusProvider.
+func (e *Evaluator) resolveMetric(sample types.MetricSample, metric string) (float64, bool) {
+	if metric == "host.status" {
+		if e.statusProvider == nil {
+			return 0, false
+		}
+		return StatusToFloat(e.statusProvider(sample.HostID))
+	}
+	return MetricValue(sample, metric)
+}
+
+// EvaluateStatus runs all `host.status` rules for a host immediately,
+// independent of sample arrival. The hub calls this when a host's status
+// transitions (in ingestLoop after a sample changes status) and when an
+// offline watchdog flips a host to "offline" (no recent sample). Without
+// this, an offline host — which has stopped sending samples — would never
+// trigger an "offline" alert because Evaluate is sample-driven.
+func (e *Evaluator) EvaluateStatus(ctx context.Context, hostID string, ts time.Time) {
+	rules, err := e.rulesFor(ctx, hostID)
+	if err != nil {
+		e.log.Error("alerts: list rules for status", "host_id", hostID, "err", err)
+		return
+	}
+	// Synthesize a minimal sample so existing evalOne can run uniformly.
+	// Only host_id + timestamp matter — resolveMetric pulls the actual value
+	// from the status provider, ignoring the sample's metric fields.
+	sample := types.MetricSample{HostID: hostID, Timestamp: ts}
+	for _, r := range rules {
+		if r.Metric != "host.status" {
+			continue
+		}
+		e.evalOne(ctx, r, sample)
 	}
 }
 
@@ -270,7 +337,8 @@ func (e *Evaluator) HandleRuleDelete(ruleID int64) {
 var SupportedMetrics = []string{
 	"cpu_pct", "mem_pct", "disk_pct", "swap_pct",
 	"load_1", "load_5", "load_15",
-	"temp.max", // shorthand: hottest sensor on the host
+	"temp.max",    // shorthand: hottest sensor on the host
+	"host.status", // host health: ok=0, warn=1, crit=2, offline=3
 }
 
 // MetricCategories declares the dotted-target families and the leaf suffixes

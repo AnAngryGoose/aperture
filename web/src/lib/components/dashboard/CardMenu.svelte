@@ -4,17 +4,25 @@
 	interface Props {
 		entry: HostEntry;
 		onclose: () => void;
+		onconfigure?: () => void;
 	}
 
-	let { entry, onclose }: Props = $props();
+	let { entry, onclose, onconfigure }: Props = $props();
 
 	function stop(e: MouseEvent) { e.stopPropagation(); }
+	function configure(e: MouseEvent) {
+		stop(e);
+		onconfigure?.();
+	}
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="menu" onclick={stop}>
+	<button class="item" onclick={configure}>Configure widget…</button>
 	<button class="item" onclick={onclose}>Pin to dashboard</button>
+	<a class="item" href="/hosts/{entry.host.id}" onclick={onclose}>Open full monitoring →</a>
+	<div class="sep"></div>
 	<button class="item" onclick={onclose}>Open shell</button>
 	<button class="item" onclick={onclose}>Restart host</button>
 	<div class="sep"></div>

@@ -7,13 +7,21 @@ export interface DashboardLayout {
 	pinnedHostIds: string[];
 	cardOrder: string[];
 	activeFilter: string;
+	/**
+	 * Per-host metric widget configuration: which metric keys to render on
+	 * the rich card. Empty / undefined entries fall back to DEFAULT_WIDGETS
+	 * from metricCatalog.ts. Users edit this via the per-card "Configure
+	 * widget" modal.
+	 */
+	cardWidgets: Record<string, string[]>;
 }
 
 const DEFAULTS: DashboardLayout = {
 	cardLayout: 'rich',
 	pinnedHostIds: [],
 	cardOrder: [],
-	activeFilter: 'all'
+	activeFilter: 'all',
+	cardWidgets: {}
 };
 
 const STORAGE_KEY = 'aperture-dashboard-layout';
@@ -62,16 +70,28 @@ function createDashboardLayoutStore() {
 		save();
 	}
 
+	function setCardWidgets(hostId: string, widgets: string[]) {
+		layout = { ...layout, cardWidgets: { ...layout.cardWidgets, [hostId]: widgets } };
+		save();
+	}
+
+	function getCardWidgets(hostId: string): string[] | undefined {
+		return layout.cardWidgets[hostId];
+	}
+
 	return {
 		get layout() { return layout; },
 		get cardLayout() { return layout.cardLayout; },
 		get activeFilter() { return layout.activeFilter; },
+		get cardWidgets() { return layout.cardWidgets; },
 		init,
 		setCardLayout,
 		setFilter,
 		pinHost,
 		unpinHost,
-		setOrder
+		setOrder,
+		setCardWidgets,
+		getCardWidgets
 	};
 }
 

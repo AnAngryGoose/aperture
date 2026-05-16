@@ -5,7 +5,10 @@
 	import HostKindIcon from '$lib/components/primitives/HostKindIcon.svelte';
 	import Tag from '$lib/components/primitives/Tag.svelte';
 	import CardMenu from './CardMenu.svelte';
+	import CardConfigModal from './CardConfigModal.svelte';
 	import { fmtBytes, fmtRate, fmtDuration } from '$lib/format';
+	import { getMetric, DEFAULT_WIDGETS } from '$lib/monitoring/metricCatalog';
+	import { dashboardLayout } from '$lib/stores/dashboardLayout.svelte';
 
 	function fmtCount(n: number | undefined): string {
 		return typeof n === 'number' ? String(n) : '—';
@@ -19,6 +22,7 @@
 	let { entry, onclick }: Props = $props();
 
 	let menuOpen = $state(false);
+	let configOpen = $state(false);
 
 	const s = $derived(entry.latest);
 	const kind = $derived((entry.host.kind as 'docker' | 'linux' | 'edge') || 'linux');
@@ -48,6 +52,70 @@
 	}
 
 	function closeMenu() { menuOpen = false; }
+
+	// Resolve the per-host widget selection, falling back to the catalog
+	// defaults when the user hasn't configured this host.
+	const widgetKeys = $derived(
+		dashboardLayout.getCardWidgets(entry.host.id) ?? [...DEFAULT_WIDGETS]
+	);
+
+	// Build the runtime widget row data: spec + series + value + color.
+	// Each row knows how to render itself based on the metric's category.
+	// Series-bearing metrics (cpu, mem, net) render a sparkline; others
+	// render just label + value.
+	interface WidgetRow {
+		key: string;
+		label: string;
+		value: string;
+		color: string;
+		series?: number[];
+		ts?: number[];
+	}
+
+	const widgetRows = $derived.by<WidgetRow[]>(() => {
+		const rows: WidgetRow[] = [];
+		for (const key of widgetKeys) {
+			const spec = getMetric(key);
+			if (!spec || !s) continue;
+			let series: number[] | undefined;
+			let value: number;
+			let color = spec.color;
+
+			switch (key) {
+				case 'cpu_pct':
+					series = entry.cpuSeries;
+					value = s.cpu_percent;
+					color = cpuColor;
+					break;
+				case 'mem_pct':
+					series = entry.memSeries;
+					value = s.mem_percent;
+					color = memColor;
+					break;
+				case 'net_rx_rate':
+					series = entry.netInSeries;
+					value = entry.netInRate;
+					break;
+				case 'net_tx_rate':
+					series = entry.netOutSeries;
+					value = entry.netOutRate;
+					break;
+				default:
+					value = spec.resolve(s);
+					break;
+			}
+
+			rows.push({
+				key,
+				label: spec.label.toUpperCase(),
+				value: spec.format ? spec.format(value) : value.toFixed(1),
+				color,
+				series,
+				ts: series ? entry.tsSeries : undefined
+			});
+		}
+		return rows;
+	});
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -82,7 +150,7 @@
 			<div class="more-wrap" style="position:relative;">
 				<button class="more-btn" onclick={toggleMenu} aria-label="More actions">⋯</button>
 				{#if menuOpen}
-					<CardMenu {entry} onclose={closeMenu} />
+					<CardMenu {entry} onclose={closeMenu} onconfigure={() => { menuOpen = false; configOpen = true; }} />
 				{/if}
 			</div>
 		</div>
@@ -97,25 +165,19 @@
 
 	<!-- Body: metrics + side panel -->
 	<div class="body">
-		<!-- Left: metric rows -->
+		<!-- Left: metric rows (driven by per-host widget config) -->
 		<div class="metrics">
-			<div class="metric-row">
-				<span class="metric-label label-mono">CPU</span>
-				<Sparkline data={entry.cpuSeries} color={cpuColor} height={26} />
-				<span class="metric-val mono" style="color:{cpuColor}">{(s?.cpu_percent ?? 0).toFixed(0)}%</span>
-			</div>
-			<div class="metric-row">
-				<span class="metric-label label-mono">MEM</span>
-				<Sparkline data={entry.memSeries} color={memColor} height={26} />
-				<span class="metric-val mono" style="color:{memColor}">{(s?.mem_percent ?? 0).toFixed(0)}%</span>
-			</div>
-			<div class="metric-row">
-				<span class="metric-label label-mono">NET</span>
-				<Sparkline data={entry.netInSeries} color="var(--info)" height={26} />
-				<span class="metric-val mono">
-					<span class="arr">↓</span>{fmtRate(entry.netInRate)}
-				</span>
-			</div>
+			{#each widgetRows as row (row.key)}
+				<div class="metric-row">
+					<span class="metric-label label-mono">{row.label}</span>
+					{#if row.series && row.series.length > 1}
+						<Sparkline data={row.series} xs={row.ts} color={row.color} height={26} />
+					{:else}
+						<span class="metric-spacer"></span>
+					{/if}
+					<span class="metric-val mono" style="color:{row.color}">{row.value}</span>
+				</div>
+			{/each}
 		</div>
 
 		<!-- Right: side panel -->
@@ -158,6 +220,10 @@
 		</div>
 	{/if}
 </div>
+
+{#if configOpen}
+	<CardConfigModal {entry} onclose={() => (configOpen = false)} />
+{/if}
 
 <style>
 	.rich-card {
@@ -258,6 +324,15 @@
 		display: grid;
 		grid-template-columns: 1fr 1fr;
 		border-top: 1px solid var(--line);
+	}
+
+	.metric-spacer {
+		/* Placeholder used when a widget metric has no series (e.g. swap_pct,
+		   load_1) — keeps the row's column alignment with sparkline-bearing
+		   metrics. */
+		width: 140px;
+		height: 26px;
+		flex-shrink: 0;
 	}
 
 	.metrics {

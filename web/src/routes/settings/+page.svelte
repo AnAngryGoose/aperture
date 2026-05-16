@@ -7,6 +7,7 @@
 	import { absTime, relTime } from '$lib/format';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { accent, ACCENTS, type AccentKey } from '$lib/stores/accent.svelte';
+	import type { HostConfig } from '$lib/types';
 
 	// ── password change ───────────────────────────────────────────────────────
 	let pwCurrent  = $state('');
@@ -124,6 +125,47 @@
 	}
 
 	onMount(loadTokens);
+
+	// ── global monitoring defaults ───────────────────────────────────────────
+	// Applied to hosts that don't have their own host_config row. The hub
+	// reads from user_settings['monitoring.defaults'] when answering
+	// GET /api/hosts/{id}/config for hosts without a row, so changes here
+	// take effect for any non-customized host immediately.
+	let defaults = $state<HostConfig | null>(null);
+	let defaultsLoading = $state(false);
+	let defaultsSaving  = $state(false);
+	let defaultsError   = $state<string | null>(null);
+	let defaultsSaved   = $state(false);
+
+	async function loadDefaults() {
+		defaultsLoading = true;
+		try {
+			defaults = await api.monitoringDefaults.get();
+			defaultsError = null;
+		} catch (e) {
+			defaultsError = (e as Error).message;
+		} finally {
+			defaultsLoading = false;
+		}
+	}
+
+	async function saveDefaults() {
+		if (!defaults) return;
+		defaultsSaving = true;
+		defaultsError = null;
+		defaultsSaved = false;
+		try {
+			await api.monitoringDefaults.put(defaults);
+			defaultsSaved = true;
+			setTimeout(() => (defaultsSaved = false), 2500);
+		} catch (e) {
+			defaultsError = (e as Error).message;
+		} finally {
+			defaultsSaving = false;
+		}
+	}
+
+	onMount(loadDefaults);
 </script>
 
 <svelte:head><title>Aperture — Settings</title></svelte:head>
@@ -171,6 +213,72 @@
 		</div>
 	</div>
 </div>
+
+<!-- ── Monitoring defaults ────────────────────────────────────────────────── -->
+<div class="section-header">
+	<div>
+		<div class="section-title">Monitoring defaults</div>
+		<div class="section-sub muted">Applied to every host that doesn't have its own monitoring config. Per-host settings always win.</div>
+	</div>
+</div>
+
+{#if defaultsLoading && !defaults}
+	<div class="card muted" style="text-align:center;padding:24px">Loading…</div>
+{:else if defaults}
+	<div class="card defaults-card">
+		<div class="defaults-grid">
+			<label class="d-field">
+				<span class="d-label">Sample interval (seconds)</span>
+				<input type="number" min="1" max="3600" bind:value={defaults.sample_interval_s} />
+			</label>
+			<label class="d-field">
+				<span class="d-label">Retention (days)</span>
+				<input type="number" min="1" max="3650" bind:value={defaults.retention_days} />
+			</label>
+			<label class="d-field">
+				<span class="d-label">Memory calculation</span>
+				<select bind:value={defaults.mem_calc}>
+					<option value="used">used (gopsutil default)</option>
+					<option value="avail">avail (matches htop)</option>
+				</select>
+			</label>
+		</div>
+
+		<div class="thresh-block">
+			<div class="thresh-head muted">Status thresholds</div>
+			<div class="thresh-rows">
+				<div class="thresh-row">
+					<span class="thresh-name">CPU %</span>
+					<label class="thresh-input"><span class="thresh-cap">warn ≥</span><input type="number" min="0" max="200" bind:value={defaults.warn_cpu} /></label>
+					<label class="thresh-input"><span class="thresh-cap">crit ≥</span><input type="number" min="0" max="200" bind:value={defaults.crit_cpu} /></label>
+				</div>
+				<div class="thresh-row">
+					<span class="thresh-name">Memory %</span>
+					<label class="thresh-input"><span class="thresh-cap">warn ≥</span><input type="number" min="0" max="200" bind:value={defaults.warn_mem} /></label>
+					<label class="thresh-input"><span class="thresh-cap">crit ≥</span><input type="number" min="0" max="200" bind:value={defaults.crit_mem} /></label>
+				</div>
+				<div class="thresh-row">
+					<span class="thresh-name">Disk %</span>
+					<label class="thresh-input"><span class="thresh-cap">warn ≥</span><input type="number" min="0" max="200" bind:value={defaults.warn_disk} /></label>
+					<label class="thresh-input"><span class="thresh-cap">crit ≥</span><input type="number" min="0" max="200" bind:value={defaults.crit_disk} /></label>
+				</div>
+				<div class="thresh-row">
+					<span class="thresh-name">Temperature °C</span>
+					<label class="thresh-input"><span class="thresh-cap">warn ≥</span><input type="number" min="0" max="200" bind:value={defaults.warn_temp} /></label>
+					<label class="thresh-input"><span class="thresh-cap">crit ≥</span><input type="number" min="0" max="200" bind:value={defaults.crit_temp} /></label>
+				</div>
+			</div>
+		</div>
+
+		<div class="defaults-bar">
+			{#if defaultsSaved}<span class="ok-msg">saved ✓</span>{/if}
+			{#if defaultsError}<span class="err-msg">{defaultsError}</span>{/if}
+			<button class="save-btn" onclick={saveDefaults} disabled={defaultsSaving}>
+				{defaultsSaving ? 'Saving…' : 'Save defaults'}
+			</button>
+		</div>
+	</div>
+{/if}
 
 <!-- ── Agent tokens ───────────────────────────────────────────────────────── -->
 <div class="section-header">
@@ -589,4 +697,98 @@
 
 	.swatch:hover { transform: scale(1.15); }
 	.swatch.active { border-color: var(--text); }
+
+	/* Monitoring defaults */
+	.defaults-card { display: flex; flex-direction: column; gap: 16px; padding: 16px; }
+
+	.defaults-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		gap: 12px;
+	}
+
+	.d-field { display: flex; flex-direction: column; gap: 4px; }
+	.d-label {
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-faint);
+		font-family: var(--font-mono);
+	}
+	.d-field input, .d-field select {
+		padding: 7px 10px;
+		font-size: 12px;
+		font-family: var(--font-mono);
+		color: var(--text);
+		background: var(--bg-elev-2);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
+	}
+	.d-field input:focus, .d-field select:focus {
+		outline: none;
+		border-color: var(--accent-line);
+	}
+
+	.thresh-block {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 12px;
+		background: var(--bg-elev-2);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
+	}
+	.thresh-head {
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		font-family: var(--font-mono);
+	}
+	.thresh-rows { display: flex; flex-direction: column; gap: 6px; }
+	.thresh-row {
+		display: grid;
+		grid-template-columns: 1fr auto auto;
+		gap: 14px;
+		align-items: center;
+	}
+	.thresh-name { font-size: 13px; color: var(--text); }
+	.thresh-input { display: inline-flex; align-items: center; gap: 6px; }
+	.thresh-cap {
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		font-family: var(--font-mono);
+		color: var(--text-faint);
+	}
+	.thresh-input input {
+		width: 70px;
+		padding: 5px 8px;
+		font-size: 12px;
+		font-family: var(--font-mono);
+		color: var(--text);
+		background: var(--bg-elev);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
+		text-align: right;
+	}
+
+	.defaults-bar {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 12px;
+	}
+	.save-btn {
+		padding: 7px 14px;
+		font-size: 12px;
+		color: #fff;
+		background: var(--accent);
+		border: 1px solid var(--accent);
+		border-radius: var(--r-md);
+		cursor: pointer;
+	}
+	.save-btn:hover { filter: brightness(1.05); }
+	.save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+	.ok-msg { color: var(--ok); font-size: 11px; font-family: var(--font-mono); }
+	.err-msg { color: var(--crit); font-size: 11px; }
 </style>

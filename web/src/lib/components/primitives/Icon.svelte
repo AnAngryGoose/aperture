@@ -7,7 +7,7 @@
 		Thermometer, Activity, MemoryStick, Database, Box, Play, Square,
 		RotateCcw, Pause, Trash2, ExternalLink, Copy, Eye, EyeOff,
 		LogOut, Key, Shield, Clock, Zap, GitBranch, Package,
-		ArrowDown, ArrowUp, Gauge, List, LayoutGrid, Rows3,
+		ArrowDown, ArrowUp, ArrowLeft, Gauge, List, LayoutGrid, Rows3,
 		Siren, Radio, Bot
 	} from 'lucide-svelte';
 
@@ -62,6 +62,7 @@
 		package: Package,
 		'arrow-down': ArrowDown,
 		'arrow-up': ArrowUp,
+		'arrow-left': ArrowLeft,
 		gauge: Gauge,
 		list: List,
 		grid: LayoutGrid,

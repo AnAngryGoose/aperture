@@ -17,6 +17,11 @@ import type {
 	SSEEnvelope
 } from '$lib/types';
 
+// Re-export legacy aliases so older imports (`HostStatus`, `HostKind`) keep
+// resolving via `$lib/stores/hosts.svelte` after that file became a passthrough.
+export type { HostStatus } from '$lib/types';
+export type HostKind = 'docker' | 'linux' | 'edge';
+
 export interface HostEntry {
 	host: Host;
 	latest: MetricSample | null;

@@ -287,6 +287,25 @@ export const api = {
 			send<{ ok: boolean; warning?: string }>(`/api/hosts/${hostID}/config`, 'PUT', cfg)
 	},
 
+	// Global monitoring defaults — applied to hosts that don't have their own
+	// host_config row. Lives under user_settings on the backend; edited via
+	// the Settings page.
+	monitoringDefaults: {
+		get: () => get<HostConfig>('/api/settings/monitoring-defaults'),
+		put: (cfg: Partial<HostConfig>) =>
+			send<{ ok: boolean }>('/api/settings/monitoring-defaults', 'PUT', cfg)
+	},
+
+	// Alert template apply: clones a named template's rules into alert_rules,
+	// scoped per-host (host_id) or globally (host_id: null). Duplicates are
+	// skipped server-side, so the call is safely re-runnable.
+	applyAlertTemplate: (template: string, hostID: string | null = null) =>
+		send<{ template: string; created: number[]; created_n: number; skipped_n: number }>(
+			'/api/alerts/templates/apply',
+			'POST',
+			{ template, host_id: hostID }
+		),
+
 	// Per-metric history (used for single-chart drill-ins; bundle returns
 	// these inline as well).
 	tempHistory: (hostID: string, range = '1h', points = 300) =>

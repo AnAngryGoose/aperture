@@ -6,6 +6,25 @@ Per-package, per-function detail of how aperture is built. This is a living docu
 
 ---
 
+## v0.4.1 — Monitoring rewrite at a glance
+
+A six-compartment effort landed in v0.4.1-alpha.1; the per-package sections below have the function-level detail. High-level map of what moved:
+
+- **`host_config` is now the source of truth** for per-host monitoring policy (sample interval, enabled collector families, NIC/sensor/mount allow-deny filters, `mem_calc` mode, retention + per-table overrides, warn/crit thresholds). Persisted in SQLite; pushed to the running collector or remote agent on every `PUT /api/hosts/{id}/config`.
+- **`internal/agentproto.TypeConfig`** is the new wire frame that carries that policy from hub to agent at connect time and on every edit. Agent's read loop calls `collector.Local.ApplyConfig` on receipt — takes effect on the next sample tick.
+- **`internal/hub.ConfigPusher` + `LocalApplier` seams** route `host_config` changes to the right transport (agent handler for remotes, in-process collector for the hub's own host). `cmd/hub` wires both at startup.
+- **Five new SQLite tables** (`temp_metrics`, `cpu_core_metrics`, `process_metrics`, `container_metrics`, `host_config`) plus a hot-path index `idx_alert_rules_eval`. Store gets matching `Insert{Temps,CPUCores,ProcessSnapshot,ContainerMetrics}` and `{Temp,CPUCore,Process,ContainerMetric}Range` helpers, plus `PruneHostMetrics` for per-host scoped retention and `Get/SetMonitoringDefaults` for user-customizable admin defaults overlaid via `user_settings['monitoring.defaults']`.
+- **`internal/collector/families/`** (new subpackage) holds the `MetricFamily` interface plus stubs for `smart`, `gpu`, `battery`, `systemd` — registered in `/api/monitoring/catalog` as `experimental:true` so the UI can list them but they currently return `ErrNotImplemented`.
+- **`internal/collector.Local`** gains `ApplyConfig`, family enablement gates (one `if l.familyEnabled("...")` per block in `sample()`), filter application (`allowName(name, allow, deny)` shared between NIC/sensor/mount/container), `mem_calc=avail` mode for ZFS-ARC-aware hosts, a heap-based top-N processes (`procCPUHeap`, `procRSSHeap` — O(N log K) instead of two full sorts), and a 30s mount-list cache.
+- **`internal/alerts`** gains the dotted-target evaluator (`iface.<name>.{rx_rate,tx_rate,rx_bytes,tx_bytes}`, `mount.<path>.{pct,used,total}`, `temp.<sensor>.value`, `proc.<name>.{cpu_pct,mem_pct,mem_rss}`, plus `temp.max` and `host.status`), `==` / `!=` ops, in-memory rules cache invalidated on mutation, `StatusProvider` seam for `host.status` resolution, `EvaluateStatus(ctx, hostID, ts)` for transition-driven evaluation, three predefined templates (`Templates()`), and a single Shoutrrr dispatcher (`ch_shoutrrr.go` + URL translators) that replaced the four hand-rolled `ch_{discord,slack,ntfy,gotify}.go` files. New `shoutrrr` channel type accepts a raw URL for any of Shoutrrr's 16+ supported services.
+- **`internal/hub`** gains the typed SSE v2 envelope (`metric` / `host_status` / `container_summary` / `alert`, backwards-compat flat metric fields), per-host retention loop (iterates hosts and prunes scoped to each), container-summary loop (polls registered docker providers every 15s, broadcasts on change), offline watchdog (every 30s, flips stale hosts to "offline" and asks the evaluator to run host.status rules), and server-side status derivation in `computeStatus` reading per-host warn/crit thresholds.
+- **`internal/api/monitoring.go`** (new file) holds the aggregated spine: `/api/monitoring/{overview,catalog}`, `/api/hosts/{id}/monitoring/bundle`, `/api/hosts/{id}/config`, `/api/settings/monitoring-defaults`, `/api/alerts/templates/apply`, and per-metric history endpoints (`metrics/{temps,cpu,procs}`, `containers/{cid}/metrics`). The bundle drives the host detail page in one fetch.
+- **Frontend** gets a `monitoringStore.svelte.ts` (single overview fetch + typed SSE consumer + 30s reconciliation poll), a `metricCatalog.ts` (single source of truth for widget picker + rule editor scalars + dynamic RichCard rendering), a rewritten 10-tab host detail page driven by the bundle, a per-card widget picker (`CardConfigModal.svelte`), interactive sparkline tooltips, a two-step alert rule editor (category → target → leaf with host-status special case), and an Apply-template panel on `/alerts`.
+
+The reactive infinite loop fix on the host detail page is documented in the changelog under v0.4.1 "Fixed".
+
+---
+
 ## Backend (Go)
 
 Module: `github.com/aperture/aperture`. Toolchain pinned to Go 1.25 (driven by the `modernc.org/sqlite` dependency).
@@ -64,7 +83,14 @@ SQLite wrapper. Uses `modernc.org/sqlite` (pure-Go) so the binary cross-compiles
 | `InsertDiskIO(ctx, m)` | Same pattern for `disk_io_metrics`. |
 | `NetIfaceRange(ctx, hostID, since, until, maxPoints)` | Fetches `net_iface_metrics` rows in range, groups by timestamp in Go, applies stride downsampling on unique timestamps (always keeping the last), and pivots into `*types.NetIfaceHistory` using a `tsIndex` map for O(1) slot lookup when filling pre-allocated series arrays. Returns a non-nil empty struct (not `nil`) when no data exists. |
 | `DiskMountRange` / `DiskIORange` | Same downsampling + pivot pattern for their respective tables. |
-| `PruneMetrics(cutoff)` | Bulk delete of old samples from all four tables (`metrics`, `net_iface_metrics`, `disk_mount_metrics`, `disk_io_metrics`). Called hourly from `hub.retentionLoop` when a retention duration is configured. Returns total rows-deleted across all tables so the caller can log non-zero prunings. |
+| `PruneMetrics(cutoff)` | Legacy bulk delete from the original four metric tables. Kept for backwards-compat callers; v0.4.1 retention runs via `PruneHostMetrics` instead so per-host policies aren't constrained by the largest retention. |
+| `PruneMetricsPerTable(cutoffs)` | Global per-table prune. Takes a `map[table]time.Time` and runs `DELETE … WHERE ts < ?` for each known metric table. `isMetricTable` allow-lists tables to prevent injection of arbitrary names. |
+| `PruneHostMetrics(hostID, cutoffs)` | Per-host scoped delete used by the v0.4.1 retention loop in `hub.pruneAllHosts`. Lets host A's 7-day temp retention prune without waiting for host B's 30-day retention to expire. |
+| `InsertTemps / InsertCPUCores / InsertProcessSnapshot / InsertContainerMetrics` | Bulk-insert helpers for the rich-history tables added in v0.4.1. Each opens a tx, prepares one statement, iterates the slice. `INSERT OR IGNORE` on the PK collision so duplicate-timestamp ingests are silently rejected at the PK layer. |
+| `TempRange / CPUCoreRange / ProcessRange / ContainerMetricRange` | History readers mirroring `NetIfaceRange` / `DiskMountRange` / `DiskIORange`. All share the new `stridePicks(all, maxPoints)` helper for uniform-stride downsampling that always keeps the last timestamp (so charts align to the right edge of the range). |
+| `GetHostConfig(hostID) / UpsertHostConfig(cfg)` | Per-host monitoring policy CRUD. Resolution order in GetHostConfig: `host_config` row → `user_settings['monitoring.defaults']` → built-in `DefaultHostConfig`. List- and map-typed fields (`enabled_families`, `family_intervals`, `filters`, `retention_overrides`) are JSON-serialized so the field set can evolve without schema migrations. |
+| `GetMonitoringDefaults(ctx) / SetMonitoringDefaults(cfg)` | User-customizable global defaults edited from `/settings`. Stored as a single JSON blob under `user_settings['monitoring.defaults']`. |
+| `DefaultHostConfig(hostID)` | Built-in fallbacks: sample_interval 5s, all families enabled, mem_calc "used", retention 30d, warn/crit 70/90 (CPU/mem/disk) and 70/85 (temp). |
 | `IsPasswordSet(ctx)` | Returns whether the `auth_config` table contains a password hash row. Used by `requireAuth` to decide whether to enforce auth or pass through (first-run mode). |
 | `GetPasswordHash(ctx)` | Returns the stored bcrypt hash, or `("", nil)` when no password is set. |
 | `SetPasswordHash(ctx, hash)` | Upserts the single `auth_config` row (id=1). Safe to call on first setup and on password change — the constraint ensures there is always exactly one row. |
@@ -98,9 +124,15 @@ Local-host metric source. Implements `hub.MetricSource`. The package documentati
 | `(*Local).diskMounts(ctx)` | Reads `disk.PartitionsWithContext(ctx, true)` (all partitions), filters entries whose fstype is in the `pseudoFS` map (sysfs, proc, devtmpfs, overlay, squashfs, cgroup2, tmpfs, etc.) or whose path contains `/docker/`, `/containerd/`, or `/overlay`. Calls `disk.UsageWithContext` per surviving mount. **Why:** docker overlay mounts flood the list otherwise; filtering by both fstype and path handles overlayfs mounts that escape the fstype filter. |
 | `(*Local).netIfaces(ctx, dt)` | Reads per-interface counters via `net.IOCountersWithContext(ctx, true)`. Skips `lo` and any interface starting with `veth`. Computes rates using `prevNetIO` delta / elapsed seconds. Updates `prevNetIO` after each call. |
 | `(*Local).diskIO(ctx, dt)` | Reads `disk.IOCountersWithContext(ctx)` (no filter arg — the full map). Skips devices starting with `loop`, `ram`, or `zram`. Computes read/write rates from `prevDiskIO` delta / elapsed. Sorts results by device name for stable ordering. |
-| `(*Local).processes(ctx)` | Collects a live process list and returns the union of top 20 by CPU + top 20 by RSS (up to 40 total). Maintains a `procCache map[int32]*gopsprocess.Process` across ticks (protected by `procMu`): dead PIDs are evicted, new PIDs are added via `NewProcessWithContext`. Calling `CPUPercentWithContext(ctx)` on the cached object measures elapsed time since the *previous* call on that same object — this is the correct way to get an accurate CPU reading, matching `top`. First tick for a newly-started process reports CPU=0 (acceptable). Processes that fail any stat call (e.g. permission denied, process exited mid-collection) are silently skipped. |
+| `(*Local).processes(ctx)` | Collects a live process list and returns the union of top-K by CPU + top-K by RSS (K=20) via `topKByCPU` / `topKByRSS` — both use min-heaps (`procCPUHeap`, `procRSSHeap`) so the cost is O(N log K) rather than two full O(N log N) sorts. Maintains a `procCache map[int32]*gopsprocess.Process` across ticks (protected by `procMu`): dead PIDs are evicted, new PIDs are added via `NewProcessWithContext`. Calling `CPUPercentWithContext(ctx)` on the cached object measures elapsed time since the *previous* call on that same object. First tick for a newly-started process reports CPU=0. |
+| `(*Local).cachedPartitions(ctx)` | Short-TTL cache (default 30s) over `disk.PartitionsWithContext` — the syscall is expensive and the mount list rarely changes between ticks. `disk.UsageWithContext` is still called fresh per cached mount each tick. |
+| `(*Local).ApplyConfig(cfg)` | Swaps in a per-host `types.HostConfig`. Sets `enabledSet` (nil = all on), `filters`, `memCalc`, and overrides `Interval` if `SampleIntervalS > 0`. Safe to call at any time; the new config takes effect on the next tick. Reads under `cfgMu.RLock` from `familyEnabled` / `getFilters` / `getMemCalc` so sampling threads can't starve a config push. |
+| `familyEnabled(name)` / `getFilters()` / `getMemCalc()` | Read-side helpers. Each block in `sample()` is gated by `familyEnabled` (e.g. `if l.familyEnabled("temps") { s.Temps = l.tempSensors(ctx) }`). Filter helpers apply allow/deny semantics via the shared `allowName(name, allow, deny)` function (deny wins; empty allow = "all allowed"). |
+| `AllFamilies` (var) | Canonical list of inline family keys (cpu, mem, disk, net, load, uptime, temps, processes, cpu_per_core, disk_io, mounts) used as the default when no host_config row exists. |
 
 `cpu.Percent(0, false)` is primed once at the start of `Run` because gopsutil's CPU percentage requires a baseline reading; without priming the very first sample reports 0%.
+
+**`internal/collector/families/`** is a separate subpackage holding the `MetricFamily` interface and stubs for opt-in collectors that shell out to external tools (`smart`, `gpu`, `battery`, `systemd`). Each stub satisfies the interface but returns `Result{Err: ErrNotImplemented}`. The seam exists so adding GPU monitoring is a single new file rather than a refactor — see `families/families.go` for the contract.
 
 ### `internal/dockerctl`
 
@@ -142,31 +174,44 @@ Rehydration: on `New(...)`, the evaluator loads all open events and seeds its `o
 | `Evaluator` (struct) | Holds the store handle, logger, and the two in-memory maps (`pending`, `open`) protected by a mutex. The mutex is taken per `evalOne`, not per `Evaluate`, so concurrent ingests for *different* hosts can interleave their rule evaluations. |
 | `ruleHostKey` (struct) | Map key combining `rule_id` and `host_id`. A struct (rather than a string `"rule_id:host_id"` join) avoids string allocation on the hot path. |
 | `New(ctx, store, log)` | Constructs the evaluator and rehydrates `open` from `store.ListAlertEvents(OpenOnly: true, Limit: 10000)`. The 10k cap is a sanity bound — homelab scale is dozens, not thousands; if it's ever exceeded we want a config knob, not a silent slow startup. |
-| `Evaluate(ctx, sample)` | Hub calls this after every successful insert. Fetches the host's enabled rules (`ListEnabledRulesFor`) and dispatches each to `evalOne`. Errors during the DB fetch are logged and ignored — losing a tick of evaluation is preferable to crashing the ingest goroutine. |
-| `evalOne(ctx, rule, sample)` | The per-rule decision tree. If breaching: skip when already firing, otherwise start a `pending` timer (firing immediately when `duration_s == 0`) and fire once the sustained window has elapsed. If not breaching: clear any `pending` entry and resolve any `open` event. Holds the mutex for the duration so the maps stay consistent. |
-| `fire(ctx, rule, sample, val, key)` | Internal helper. Inserts the `alert_events` row, records the new id in `open`, drops the `pending` entry, and emits a `WARN` log line so an operator tailing logs sees alerts without needing the UI. Caller holds the mutex. |
-| `HandleRuleDelete(ruleID)` | Drops every `pending` and `open` entry for the deleted rule. Called by the API's DELETE handler so we don't leak transient state for a rule that no longer exists (such state could otherwise sit forever — an event resolved on the next breach end, but a `pending` entry would never resolve at all). |
-| `MetricValue(sample, name)` | Translates a metric name (`cpu_pct`, `mem_pct`, `disk_pct`, `swap_pct`, `load_1`, `load_5`, `load_15`) to its numeric value on a sample. Returns `(0, false)` for unknown names so the evaluator can warn-log rather than fire spuriously. `swap_pct` divides `swap_used / swap_total` defensively (returns 0 when the host has no swap). |
-| `SupportedMetrics` (var) | Canonical metric list. The API exposes it via `/api/alerts/metadata` so the UI dropdown stays in sync without a second source of truth. |
-| `compare(v, op, threshold)` | The four-way operator dispatch. Tiny on purpose — keeping it switch-based (rather than a map of funcs) keeps it inlinable and obvious. |
-| `fire(ctx, rule, sample, val, key)` + notifier hook | After persisting the event and updating the `open` map, `fire()` calls `go e.notifier.Dispatch(ctx, ev, r, false)` if a notifier is wired in. The resolve path similarly calls `go e.notifier.Dispatch(ctx, ev, r, true)`. Both are goroutines so a slow/hanging HTTP sender can't stall the evaluator's mutex-hold window. |
-| `SetNotifier(n)` | Sets the `Notifier` on the evaluator. Called from `cmd/hub/main.go` after constructing both. Nil-safe — tests and scripts that don't need notifications can skip it. |
+| `Evaluate(ctx, sample)` | Hub calls this after every successful insert. Reads the host's enabled rules from the in-memory cache (`rulesFor` — populated lazily, invalidated on rule mutations via `Invalidate()`) and dispatches each to `evalOne`. Errors during the DB fetch are logged and ignored — losing a tick of evaluation is preferable to crashing the ingest goroutine. |
+| `EvaluateStatus(ctx, hostID, ts)` | Runs `host.status` rules independent of sample arrival. The hub calls this on every status transition and from the offline watchdog (every 30s on hosts with stale `last_seen`) so an "offline" alert fires even though the host stopped sending samples. |
+| `evalOne(ctx, rule, sample)` | The per-rule decision tree. Uses `resolveMetric` (a thin wrapper around `MetricValue` that special-cases `host.status` via the registered `StatusProvider`). If breaching: skip when already firing, otherwise start a `pending` timer (firing immediately when `duration_s == 0`) and fire once the sustained window has elapsed. If not breaching: clear any `pending` entry and resolve any `open` event. Holds the mutex for the duration so the maps stay consistent. |
+| `fire(ctx, rule, sample, val, key)` | Internal helper. Inserts the `alert_events` row, records the new id in `open`, drops the `pending` entry, emits a `WARN` log line, and (if a notifier is wired) goroutine-dispatches it. Caller holds the mutex. |
+| `HandleRuleDelete(ruleID)` | Drops every `pending` and `open` entry for the deleted rule and calls `Invalidate()` so the rules cache reloads. Called by the API's DELETE handler. |
+| `Invalidate()` | Clears the in-memory rules cache. The API calls it after every rule create / update / delete so the next `Evaluate` reloads. |
+| `rulesFor(ctx, hostID)` | Cache-backed lookup. First call loads all enabled rules via `ListAlertRules(nil)`; subsequent calls filter in-memory. RLock-fast-path / Lock-on-populate pattern. |
+| `MetricValue(sample, name)` | Translates a metric name to its numeric value. Supports flat scalars (`cpu_pct`, `mem_pct`, `disk_pct`, `swap_pct`, `load_1/5/15`, `temp.max`) and **dotted targets**: `iface.<name>.{rx_rate,tx_rate,rx_bytes,tx_bytes}`, `mount.<path>.{pct,used,total}`, `temp.<sensor>.value`, `proc.<name>.{cpu_pct,mem_pct,mem_rss}` (max across matching processes). Uses `SplitN(metric, ".", 2)` + `LastIndex(".")` to handle mount paths with no nested dots. Returns `(0, false)` on unknown name or missing target so the evaluator can warn-log rather than fire spuriously. |
+| `StatusProvider` (type) | Function type `func(hostID string) float64` used to resolve `host.status` outside the sample payload. `cmd/hub` wires `Hub.LatestStatus` into it. |
+| `StatusToFloat(s)` | Encodes a host status string to a numeric value (`ok=0`, `warn=1`, `crit=2`, `offline=3`) so the existing `threshold REAL` column works unchanged. |
+| `SupportedMetrics` / `MetricCategories` (vars) | Canonical metric list + dotted-target category map. The API exposes both via `/api/alerts/metadata` and `/api/monitoring/catalog` so the UI dropdown stays in sync without a second source of truth. |
+| `SupportedOps` (var) | `>`, `>=`, `<`, `<=`, `==`, `!=`. The string ops (`==`/`!=`) are needed for `host.status` rules using the encoded numeric mapping above. |
+| `compare(v, op, threshold)` | The six-way operator dispatch. Tiny on purpose — switch-based for inlinability. |
+| `ValidateRule(rule)` | Centralized validation. Accepts flat names in `SupportedMetrics` *or* dotted names whose category is in `MetricCategories` and whose leaf suffix is one of that category's known leaves. Both create and update call this before touching the DB. |
+| `SetNotifier(n)` / `SetStatusProvider(p)` | Wires the notifier and status provider into the evaluator. Called from `cmd/hub/main.go` after constructing the hub. Nil-safe. |
 
-**Notification delivery (`notify.go` + `ch_*.go`):**
+**Templates (`templates.go`):**
 
 | Name | Purpose |
 | --- | --- |
-| `Notifier` | Loads enabled channels from the store and dispatches per-channel. `Dispatch(ctx, event, rule, resolved)` loads the host row (for name), filters channels by `SeverityLevel(ch.MinSeverity) <= SeverityLevel(rule.Severity)` and `ch.NotifyResolve`, then fires a goroutine per channel. Each goroutine creates its own `context.WithTimeout(context.Background(), 15*time.Second)` so a hung webhook cannot hold a goroutine open indefinitely. One DB query for host + one for channels per dispatch; acceptable for low-frequency alert events. |
-| `SeverityLevel(s)` | `"info"→0`, `"warning"→1`, `"critical"→2`. Exported so the API can use it for validation if needed. |
-| `BuildSender(ch)` | Exported wrapper around `buildSender(ch)` so the `testAlertChannel` API handler can validate a channel's config without a full Dispatch. |
-| `DiscordSender` | POSTs a rich embed to a Discord incoming webhook. Embed color is severity-coded (`#e74c3c` critical, `#f39c12` warning, `#3498db` info, `#2ecc71` resolved). |
-| `SlackSender` | POSTs a Slack attachment to an incoming webhook. Color maps to `danger/warning/good`. |
-| `NtfySender` | Posts to `{url}/{topic}`. Priority auto-mapped (critical→urgent, warning→high, info→default, resolved→low). Tags use ntfy's built-in emoji tags (`rotating_light` / `white_check_mark`). Optional bearer-token auth. |
-| `GotifySender` | Posts to `{url}/message?token={token}`. Priority auto-mapped (critical→10, warning→5, info→1, resolved→2). |
+| `Template` / `TemplateRule` | Wire shape for predefined rule sets. |
+| `Templates()` | Returns the built-in set: "Beszel defaults" (5 rules — cpu/mem/disk/temp.max thresholds + host.status==offline/2m), "Aggressive" (lower thresholds, shorter durations), "Quiet" (higher thresholds). Defined as a function rather than a `var` so future user-defined templates can layer in via `user_settings`. |
+| `TemplateByName(name)` | Lookup helper used by the API endpoint. |
+| `ApplyTemplate(ctx, store, template, hostID *string)` | Clones the template's rules into `alert_rules`. Snapshots existing rules first and skips duplicates by `(metric, op, threshold)` triple — apply is additive, not destructive. Calls `ValidateRule` defensively so a bad template fails loudly. |
+
+**Notification delivery (`notify.go` + `ch_shoutrrr.go` + `ch_webhook.go`):**
+
+| Name | Purpose |
+| --- | --- |
+| `Notifier` | Loads enabled channels from the store and dispatches per-channel. `Dispatch(ctx, event, rule, resolved)` loads the host row (for name), filters channels by `SeverityLevel(ch.MinSeverity) <= SeverityLevel(rule.Severity)` and `ch.NotifyResolve`, then fires a goroutine per channel. Each goroutine creates its own `context.WithTimeout(context.Background(), 15*time.Second)` so a hung webhook cannot hold a goroutine open indefinitely. |
+| `SeverityLevel(s)` | `"info"→0`, `"warning"→1`, `"critical"→2`. |
+| `BuildSender(ch)` | Exported wrapper so the `testAlertChannel` API handler can validate a channel's config without a full Dispatch. |
+| `buildSender(ch)` | Switches on `ch.Type`. For `"discord"`, `"slack"`, `"ntfy"`, `"gotify"`, `"shoutrrr"`: calls `ToShoutrrrURL` and constructs a `ShoutrrrSender`. For `"webhook"`: keeps the dedicated `WebhookSender` because its JSON-POST body shape doesn't map cleanly onto Shoutrrr's `generic://` service. |
+| `ShoutrrrSender.Send(ctx, n)` | Builds a `shoutrrr/pkg/router.ServiceRouter` with a 12s timeout (the outer dispatch context adds another 15s cap), calls `Send` with a formatted message and a `*types.Params` carrier (title, color hex, priority) that target services consume opportunistically. |
+| `ToShoutrrrURL(ch)` | Translates a legacy channel row to a Shoutrrr service URL. Native `"shoutrrr"` channels return their config URL unchanged. `"discord"` → `discord://<token>@<id>` parsed from the webhook URL. `"slack"` → `slack://hook:<T>-<B>-<X>@webhook`. `"ntfy"` → `ntfy://[token@]<host>/<topic>?scheme=<http|https>&priority=...`. `"gotify"` → `gotify://<host>/<token>[?disableTLS=true]`. |
 | `WebhookSender` | POSTs (or configured method) a structured JSON payload to any URL. Optional `headers` map applied to the request. Payload includes `type` (`alert_fired`/`alert_resolved`), `host`, `rule`, `event`, and `resolved_at`. |
-| `SupportedOps` (var) | Canonical op list, exposed alongside `SupportedMetrics` in the metadata endpoint. |
-| `ValidateRule(rule)` | Centralized validation: non-empty metric, metric in `SupportedMetrics`, op in `SupportedOps`, `duration_s >= 0`. Both create and update call this before touching the DB so invalid rules can never be persisted. |
-| `contains(xs, x)` | Tiny linear-search helper. The metric/op slices are small fixed sets; a map would be over-engineered. |
+| Legacy config structs (`DiscordConfig`, `SlackConfig`, `NtfyConfig`, `GotifyConfig`) | Now in `legacy_configs.go` — retained for unmarshalling stored rows. The Send implementations they used to accompany have been removed in favor of `ch_shoutrrr.go`. |
+| `contains(xs, x)` | Tiny linear-search helper for the small fixed sets. |
 
 ### `internal/hub`
 
@@ -180,9 +225,17 @@ Orchestration layer. Owns the host registry, the central metric ingest channel, 
 | `latestRich` | In-memory map from `host_id` to the most recent full `MetricSample`. Written by `ingestLoop` before the SQLite insert. Rich live-only fields (per-core, per-interface, disk mounts, disk I/O, temps) live here only — the SQLite row has none of them. |
 | `LatestSample(hostID)` | RLock-protected read of `latestRich`. Returns `(sample, true)` when present, `({}, false)` otherwise. Used by `latestMetric` to prefer the in-memory rich snapshot over the DB row. |
 | `New(cfg)` | Constructor. Slog default is used if no logger is supplied; this keeps tests and quick scripts simple. |
-| `(*Hub).Run(ctx)` | Spins up the ingest loop and (when retention > 0) the retention loop, then blocks until `ctx` is cancelled. Returns only after both goroutines exit so `cmd/hub` can rely on the post-Run quiescence. |
-| `(*Hub).ingestLoop(ctx)` | Reads samples off `h.samples`, persists each one, bumps `last_seen`, and (best-effort) inserts rich historical data into the three subsidiary tables. After `InsertMetric` succeeds, `InsertNetIfaces`, `InsertDiskMounts`, and `InsertDiskIO` are called when their respective slices are non-empty; errors are logged but don't abort the loop. This means a single disk write failure doesn't poison historical network or mount data. |
-| `(*Hub).retentionLoop(ctx)` | Hourly `PruneMetrics` for samples older than `h.retain`. Hourly is a deliberate compromise: frequent enough to keep the table small, infrequent enough not to interfere with reads. |
+| `(*Hub).Run(ctx)` | Spins up four background goroutines: `ingestLoop`, `retentionLoop`, `containerSummaryLoop`, and `offlineWatchdog`. Blocks until `ctx` is cancelled, then waits for all four to exit. |
+| `(*Hub).ingestLoop(ctx)` | Reads samples off `h.samples`, persists each one, bumps `last_seen`, and (best-effort) inserts the rich historical tables (`NetIfaces`, `DiskMounts`, `DiskIO`, `Temps`, `CPUCores`, `Processes`). Each insert is independent — a temp write failure doesn't poison disk-io history. After persisting, calls `evaluator.Evaluate(ctx, sample)` then computes the host's new status via `computeStatus` (reading per-host warn/crit thresholds from `host_config`). Broadcasts a `metric` SSE event (backwards-compat flat fields) and, on status transition, a `host_status` event + `evaluator.EvaluateStatus` to fire host.status rules. |
+| `(*Hub).computeStatus(ctx, sample, maxTemp)` | Returns `"ok"` / `"warn"` / `"crit"` based on the host's `warn_*` / `crit_*` thresholds. Falls back to `DefaultHostConfig` if the config read fails — never panics on a transient DB error during ingest. The watchdog (not this function) emits `"offline"`. |
+| `(*Hub).retentionLoop(ctx)` / `pruneAllHosts(ctx)` | Hourly tick. For each host: read its config, build per-table cutoffs from `retention_days` + `retention_overrides`, call `store.PruneHostMetrics(host.ID, cutoffs)`. Errors per host are logged so a single failing host doesn't stop the others. |
+| `(*Hub).containerSummaryLoop(ctx)` / `refreshAllContainerCounts(ctx)` | 15s ticker. Iterates registered docker providers, counts running/stopped/unhealthy from `Provider.List(ctx, true)`, calls `SetContainerCounts(hostID, counts)`. Replaces the dashboard's per-host Docker polling. |
+| `(*Hub).SetContainerCounts(hostID, counts)` / `ContainerCounts(hostID)` | Cached read/write. `Set` broadcasts a `container_summary` SSE event only when the counts changed (saves bandwidth and client churn). Public so a remote-agent transport can push its own counts on its own cadence. |
+| `(*Hub).offlineWatchdog(ctx)` / `tickOfflineWatchdog(ctx)` | 30s ticker. For each known host, computes a stale threshold of `max(2 × cfg.SampleIntervalS, 30s)` and flips hosts whose `last_seen` exceeds it to `"offline"`. On transition broadcasts a `host_status` SSE event and calls `evaluator.EvaluateStatus(ctx, host.ID, now)` so host.status rules can fire even though the host stopped sending samples. |
+| `LatestStatus(hostID)` | RLock-protected lookup of the cached per-host status. Used by the monitoring overview endpoint and (via `cmd/hub`) by the evaluator's `StatusProvider`. |
+| `ConfigPusher` / `LocalApplier` interfaces | Seams for routing `host_config` changes. `cmd/hub` wires the agent handler as the pusher and the in-process collector as the applier (registered with the local host's id). `PushConfigToAgent(ctx, hostID)` reads the config from store and dispatches via the right transport. |
+| `SSEEvent` (struct) | Typed envelope with `Type` ∈ `"metric"` / `"host_status"` / `"container_summary"` / `"alert"`. Flat CPU/Mem/NetIn/NetOut/Temp/DiskPct fields are non-`omitempty` so a host at exactly 0% still emits the value (otherwise the frontend would see undefined and skip the update). Status / Containers / Alert fields are `omitempty` and only set for their respective types. |
+| `ContainerCounts` / `AlertEnvelope` | Nested payload structs for the `container_summary` and `alert` event types. |
 | `(*Hub).RegisterSource(ctx, src)` | Asks the source for `HostInfo`, derives a stable host_id, upserts the host row, then launches the source's `Run` against a per-source channel adapter that stamps the host_id onto every sample. Returns the host_id so the caller can pair it with a docker provider. |
 | `(*Hub).samplesIn(hostID)` | Returns a per-source send channel that stamps `host_id` on samples and forwards to the central channel. Decouples sources from the host_id assignment — sources don't need to know what id they got. Drops on full central buffer with a warning, matching collector backpressure semantics. |
 | `(*Hub).RegisterDocker(hostID, p)` / `Docker(hostID)` | Concurrent-safe registry of docker providers by host. The API uses `Docker` to dispatch container endpoints. |
@@ -202,6 +255,21 @@ Orchestration layer. Owns the host registry, the central metric ingest channel, 
 ### `internal/api`
 
 HTTP layer. chi-based, all routes under `/api`. The same handler can optionally serve a SvelteKit static build at `/` with SPA fallback so a single binary covers UI + API.
+
+The **monitoring spine** added in v0.4.1 lives in `monitoring.go` and aggregates what the dashboard and host-detail page need into single calls, replacing the prior N+1 fan-out. Frontend code uses these as the primary data source; the older per-host endpoints stay for single-slice fetches.
+
+| Endpoint | Handler | Purpose |
+| --- | --- | --- |
+| `GET /api/monitoring/overview` | `monitoringOverview` | Hosts + latest sample + container counts + open-alert counts + status. One query for the open-events count grouped in Go; everything else is in-memory from the hub. The dashboard's only blocking fetch on first paint. |
+| `GET /api/monitoring/catalog` | `monitoringCatalog` | Families list (including experimental scaffolds), scalar metric list, alert categories+leaves, alert ops, predefined templates. Sourced from `alerts.SupportedMetrics`, `alerts.MetricCategories`, `alerts.SupportedOps`, and `buildCatalogTemplates()` (which maps `alerts.Templates()` to the wire shape). |
+| `GET /api/hosts/{id}/monitoring/bundle?range=&points=&include=` | `monitoringBundle` | Host record + latest sample + host_config + history series + open alerts in one response. The optional `include=metrics,net,mounts,diskio,temps,cpu` query param lets the caller skip series they don't need (the host-detail page passes the full set; the dashboard's drill-in passes nothing and gets only the host + latest). |
+| `GET /api/hosts/{id}/config` / `PUT` | `getHostConfig` / `putHostConfig` | Per-host monitoring policy. PUT validates, persists via `store.UpsertHostConfig`, then calls `hub.PushConfigToAgent(ctx, hostID)` to dispatch to the right transport. Returns `{ok:true, warning?:"..."}` so an agent-disconnected warning surfaces without failing the request. |
+| `GET /api/settings/monitoring-defaults` / `PUT` | `getMonitoringDefaults` / `putMonitoringDefaults` | Global defaults applied to hosts without their own row. Stored as JSON in `user_settings['monitoring.defaults']`. |
+| `POST /api/alerts/templates/apply` | `applyAlertTemplate` | Body: `{template:"Beszel defaults", host_id:null|"id"}`. Calls `alerts.ApplyTemplate` (which skips duplicates) and `evaluator.Invalidate()` if any rules were created. Returns `{template, created:[ids], created_n, skipped_n}`. |
+| `GET /api/hosts/{id}/metrics/{temps,cpu,procs}` and `GET /api/hosts/{id}/containers/{cid}/metrics` | `tempHistory`, `cpuCoreHistory`, `procHistory`, `containerHistory` | Per-metric history for single-chart drill-ins. `procHistory` requires `?name=`. All share `parseRangeQuery(r)` for `range` + `points` parsing (defaults: 1h, 300 points). |
+| `includeSet(raw)` (helper) | — | Parses `?include=a,b,c`. Empty/missing param returns a function that says "yes" for everything. |
+| SSE envelope changes | `streamMetrics` | The handler is unchanged structurally but now JSON-marshals the typed `SSEEvent` envelope. Pre-v0.5 clients still read `event.cpu` / `event.mem` etc. directly under the implicit `type:"metric"` default. New clients route on `event.type` to handle `host_status` / `container_summary` / `alert`. |
+| `s.evaluator.Invalidate()` callers | `createAlertRule`, `updateAlertRule`, `deleteAlertRule`, `applyAlertTemplate` | Every rule mutation invalidates the evaluator's rules cache so the next sample evaluates against the fresh set. |
 
 | Function | Use & reason |
 | --- | --- |
@@ -401,8 +469,9 @@ Two files replace the old `styles.css`:
 | --- | --- |
 | `theme.svelte.ts` | `ThemeMode` (`dark|light|system`). Reads/writes `localStorage`. Applies `document.documentElement.dataset.theme`. Listens to `prefers-color-scheme` media query when mode is `system`. |
 | `accent.svelte.ts` | `AccentKey` (one of 6). Applies `--accent`, `--accent-soft`, `--accent-line` to `:root`. |
-| `hosts.svelte.ts` | `Record<string, HostEntry>` — one entry per host. Carries `host`, `latest` sample, 60-sample ring buffers (`cpuSeries`, `memSeries`, `netInSeries`, `netOutSeries`, `tsSeries`), and a `status` (`ok|warn|crit|offline`). **`netInSeries` / `netOutSeries` and `netInRate` / `netOutRate` are bytes-per-second rates** derived from successive cumulative samples — `latest.net_rx_bytes` is the raw cumulative counter and must not be displayed as a rate. `containers: { running, stopped, unhealthy } \| null` is populated by `setContainerCounts` (called from `dashboard/+page.svelte` per-poll). SSE subscriber at `/api/stream/metrics` updates ring buffers live. Files must use the `.svelte.ts` extension for runes to compile. |
-| `dashboardLayout.svelte.ts` | `layout` (rich/tile/list), `pinned` host set, `filter` (tag or "all"), `cardOrder`. Persists to `localStorage` + `/api/settings/dashboard-layout` on change. |
+| `monitoring.svelte.ts` (v0.4.1, **canonical**) | Replaces the legacy host store. `Record<string, HostEntry>` with `host`, `latest`, ring buffers (`cpuSeries`, `memSeries`, `netInSeries`, `netOutSeries`, `tsSeries`), derived `netInRate` / `netOutRate`, server-supplied `status`, `containers: ContainerCounts \| null`, `openAlerts: number`. Exposes `hydrate(overview)` for the single overview fetch, `connectSSE(baseUrl)` for the typed-envelope consumer, and `disconnectSSE()`. SSE handler switches on `env.type` and routes `metric` / `host_status` / `container_summary` / `alert` to the right state mutation. Ring buffers are preserved across `hydrate()` so reconciliation reloads don't flatten the sparkline. |
+| `hosts.svelte.ts` (alias) | A thin passthrough that re-exports `monitoringStore as hostStore` + the relevant types. Lets every pre-v0.4.1 import (`PageHeader`, `FilterBar`, `Sidebar`, `RichCard`, etc.) keep working without an import-rename pass. |
+| `dashboardLayout.svelte.ts` | `cardLayout` (rich/tile/list), `pinnedHostIds`, `cardOrder`, `activeFilter`, plus v0.4.1's **`cardWidgets: Record<hostID, string[]>`** carrying the per-host metric selection from `CardConfigModal`. Persists to `localStorage` + `/api/settings/dashboard-layout` on change. |
 
 ### Dashboard components (`web/src/lib/components/dashboard/`)
 
@@ -412,21 +481,39 @@ Two files replace the old `styles.css`:
 | `FilterBar.svelte` | Tag filter pill tabs (derived from all host tags) + Rich/Tile/List segmented control + gradient "Add host" button. |
 | `HostGrid.svelte` | Outer grid container. Switches grid-template-columns by layout. Renders loading skeletons, `EmptyBlock`, or `ErrorBlock` when appropriate. |
 | `HostCard.svelte` | Variant switcher — delegates to `RichCard`, `TileCard`, or `CompactRow`. |
-| `RichCard.svelte` | `minmax(560px, 1fr)`. Left 3px status rail (ok/warn/crit/offline). Sparklines for CPU, Mem, Net. Side info panel (OS/arch, uptime, container counts). Alert footer when `openAlerts > 0`. `⋯` menu button (`stopPropagation`) → `CardMenu`. Click anywhere else → drill-in. |
+| `RichCard.svelte` | `minmax(560px, 1fr)`. Left 3px status rail (ok/warn/crit/offline). **Dynamic metric rows** driven by `dashboardLayout.getCardWidgets(host.id)` (falls back to `DEFAULT_WIDGETS` from `monitoring/metricCatalog.ts`). Each row resolves via `getMetric(key)` to label / value / color / sparkline series — CPU/Mem/Net use the entry's ring buffers, other metrics render label + value with a placeholder spacer. Side info panel (OS/arch, uptime, container counts). Alert footer when `openAlerts > 0`. `⋯` menu (`stopPropagation`) → `CardMenu` with "Configure widget…" item opening `CardConfigModal`. |
+| `CardConfigModal.svelte` | Per-card widget picker. Lists metrics from `metricCatalog.metricsByCategory()` grouped by CPU/Memory/Disk/Network/Load/Temperature/Other. 2–4 selections enforced; at the cap, picking a new metric replaces the oldest. Persists via `dashboardLayout.setCardWidgets(hostID, keys)`. |
+| `CardMenu.svelte` | Popover anchored to the `⋯` button. Items: Configure widget… / Pin to dashboard / Open full monitoring → / Open Shell / Restart / Remove. Closes on click-outside; "Configure widget" calls the provided `onconfigure` prop instead. |
 | `TileCard.svelte` | `minmax(320px, 1fr)`. 2×2 metric grid: CPU/Mem/Net↓/Temp tiles each with status-colored sparkline. |
 | `CompactRow.svelte` | Single row, 7 columns: status dot, name+kind, OS/arch, CPU%, Mem%, Net↓, tags. |
 | `AddWidgetTile.svelte` | Dashed "+" tile matching the current layout's card size. Turns accent background on hover. |
 | `CardMenu.svelte` | Popover anchored to the `⋯` button. Actions: Pin/Unpin, Open Shell, Restart, Remove. Danger style on Remove. Closes on click-outside. |
 
-### Drill-in components (`web/src/lib/components/host/`)
+### Host components (`web/src/lib/components/host/`)
+
+This directory holds two surfaces: the DrillIn slide-over modal (kept as the dashboard's fast preview), and the v0.4.1 host detail page tab components.
 
 | Component | Role |
 | --- | --- |
-| `DrillIn.svelte` | Full-height right panel sliding in from the right (260ms `--ease-card`). Backdrop with blur. Sticky header: close btn, `HostKindIcon`, host name, `StatusIndicator`, tag chips, action buttons (Restart/SSH/Update/Stop). Tab nav: Overview / Containers / Stacks / Logs / Shell. Overview: 4-column `BigMetric` grid + 3-column lower panels. Other tabs link to full management pages. Esc and backdrop click close. |
+| `DrillIn.svelte` | Full-height right panel sliding in from the right (260ms `--ease-card`). Backdrop with blur. Sticky header: close btn, `HostKindIcon`, host name, `StatusIndicator`, tag chips, action buttons (Restart/SSH/Update/Stop). Tab nav: Overview / Containers / Stacks / Logs / Shell. Overview is now: 4-column `BigMetric` grid (CPU/Mem/Net/Temperature with live max-temp value), `StoragePanel` + (kind-conditional) `ContainersPanel` or top-5 process peek + `EventsPanel`, a sensors mini-panel under the lower panels, and an "Open full host monitoring →" CTA into `/hosts/{id}`. Esc and backdrop click close. |
 | `BigMetric.svelte` | Elevated card with 26px mono value, sub label, and `Sparkline`. |
 | `StoragePanel.svelte` | Per-mount rows (name + size) each with a `Meter` bar. Falls back to root disk if no `disk_mounts`. |
 | `ContainersPanel.svelte` | Running/Stopped/Unhealthy stat grid + "Top by CPU" list (up to 4 containers). |
 | `EventsPanel.svelte` | Last 8 alert events. `fired_at` relative time + "Firing/Resolved — rule #N (val)". Warn color / ok color on resolved. |
+| `HostHeader.svelte` | The full host detail page's identity strip — back link, host icon, name + status indicator + tag chips, mono meta line (platform / arch / cpu count / RAM / uptime / last-seen), and action buttons. |
+| `RangePicker.svelte` | Segmented control with `15m` / `1h` / `6h` / `24h` / `7d` / `30d`. Persists the choice per-host in `localStorage` under `aperture.range.{hostID}`. |
+| `OverviewTab.svelte` | 4 BigMetric cards (CPU/Mem/Net/Temp, color-coded against `host_config` thresholds), alert banner, top-3 process peek. |
+| `CPUTab.svelte` | Aggregate CPU chart, live per-core grid with bars, per-core history (multi-series), load-average chart. |
+| `MemoryTab.svelte` | Used/cached/free segmented bar, used-vs-total history, swap chart (when swap exists). |
+| `DiskTab.svelte` | Mount table with usage meters, live disk-I/O table, disk-I/O history chart (read+write per device), per-mount history chart per mount. |
+| `NetworkTab.svelte` | Live interface table (rates + totals), aggregate rate chart, per-interface history charts. |
+| `SensorsTab.svelte` | Live sensor grid (colored by threshold), multi-series temperature history. |
+| `ProcessesTab.svelte` | Sortable table (CPU or Memory). Click a row to expand inline history (calls `/api/hosts/{id}/metrics/procs?name=...`). |
+| `DockerTab.svelte` | Running/Stopped/Unhealthy summary, container table, link out to `/hosts/{id}/containers` for full management. |
+| `EventsTab.svelte` | Per-host alert event history (resolved + firing). |
+| `MonitoringSettingsTab.svelte` | Edits `host_config` — sample interval, retention, mem_calc, family checkboxes, warn/crit thresholds, NIC/sensor/mount filters. PUTs to `/api/hosts/{id}/config` and reloads the bundle on save. |
+
+The detail page (`web/src/routes/hosts/[id]/+page.svelte`) loads one `bundle` on mount and on `(id, range)` change via a `lastFetchKey`-guarded `$effect` (the effect must NOT read `bundle` itself — that was the v0.4.1 infinite-loop regression and is documented in the changelog as the post-mortem).
 
 ### Add-host components (`web/src/lib/components/addhost/`)
 

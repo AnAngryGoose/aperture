@@ -29,6 +29,17 @@
 	let canvasEl: HTMLDivElement;
 	let plot: uPlot | null = null;
 
+	// uPlot writes directly to canvas, so it can't read CSS variables. We
+	// resolve the v0.4 tokens once at construction time. On theme switch the
+	// chart is currently not rebuilt; the colors will look stale until the
+	// next mount. Acceptable today because the v0.4 host detail page rebuilds
+	// charts on range changes, which the user does frequently.
+	function resolveToken(name: string, fallback: string): string {
+		if (typeof window === 'undefined') return fallback;
+		const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+		return v || fallback;
+	}
+
 	// Tooltip reactive state — updated from inside uPlot's setCursor hook.
 	type TT = {
 		show: boolean;
@@ -55,6 +66,10 @@
 	function buildOpts(w: number): uPlot.Options {
 		// Capture strokes at build-time so hook closures stay consistent.
 		const ss = series.map((s, i) => s.stroke ?? palette[i % palette.length]);
+		// Resolve v0.4 design tokens for canvas-side rendering. Fallbacks
+		// preserve the prior pre-v0.4 look if anything goes wrong.
+		const axisStroke = resolveToken('--text-faint', '#6b7494');
+		const gridStroke = resolveToken('--line', '#1c253a');
 
 		return {
 			width: w,
@@ -62,17 +77,17 @@
 			legend: { show: false },
 			axes: [
 				{
-					stroke: '#6b7494',
-					grid: { stroke: '#1c253a', width: 1 },
+					stroke: axisStroke,
+					grid: { stroke: gridStroke, width: 1 },
 					ticks: { show: false },
-					font: '11px system-ui,sans-serif',
+					font: '11px var(--font-mono), ui-monospace, monospace',
 					gap: 5
 				},
 				{
-					stroke: '#6b7494',
-					grid: { stroke: '#1c253a', width: 1 },
+					stroke: axisStroke,
+					grid: { stroke: gridStroke, width: 1 },
 					ticks: { show: false },
-					font: '11px system-ui,sans-serif',
+					font: '11px var(--font-mono), ui-monospace, monospace',
 					gap: 8,
 					values: (_u: uPlot, ticks: number[]) =>
 						ticks.map(v => (v == null ? '' : fmtVal(v))),
@@ -227,10 +242,10 @@
 		position: absolute;
 		z-index: 20;
 		pointer-events: none;
-		background: rgba(9, 12, 22, 0.93);
+		background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
 		backdrop-filter: blur(10px);
 		-webkit-backdrop-filter: blur(10px);
-		border: 1px solid var(--border);
+		border: 1px solid var(--line);
 		border-radius: 7px;
 		padding: 9px 11px;
 		font-size: 11px;
@@ -242,7 +257,7 @@
 		color: var(--text-dim);
 		margin-bottom: 7px;
 		padding-bottom: 6px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--line);
 		white-space: nowrap;
 		font-size: 10.5px;
 	}
@@ -267,7 +282,7 @@
 		min-width: 0;
 	}
 	.tt-val {
-		font-family: var(--mono);
+		font-family: var(--font-mono);
 		color: var(--text);
 		white-space: nowrap;
 		font-variant-numeric: tabular-nums;

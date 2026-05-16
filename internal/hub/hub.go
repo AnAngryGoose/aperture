@@ -183,6 +183,10 @@ type Hub struct {
 // substitute a stub.
 type Evaluator interface {
 	Evaluate(ctx context.Context, sample types.MetricSample)
+	// EvaluateStatus runs `host.status` rules independent of sample arrival.
+	// Called on every status transition (and from the offline watchdog) so
+	// an "offline" alert fires even though the host stopped sending samples.
+	EvaluateStatus(ctx context.Context, hostID string, ts time.Time)
 }
 
 // ConfigPusher pushes a per-host monitoring config to a remote agent over
@@ -328,9 +332,86 @@ func (h *Hub) Run(ctx context.Context) error {
 		defer wg.Done()
 		h.containerSummaryLoop(ctx)
 	}()
+	// Offline watchdog: hosts that stop sending samples never trigger
+	// status-derived alerts via ingestLoop (which only runs on incoming
+	// samples). The watchdog flips stale hosts to "offline" and dispatches
+	// the transition + status-rule evaluation.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h.offlineWatchdog(ctx)
+	}()
 	<-ctx.Done()
 	wg.Wait()
 	return nil
+}
+
+// offlineWatchdog runs every 30s. For each known host it checks last_seen
+// against a generous threshold (max(2 × host's sample interval, 30s)) and
+// transitions stale hosts to "offline". On transition it broadcasts the
+// host_status SSE event and asks the evaluator to run host.status rules
+// so an offline-targeted alert can fire even though the host stopped
+// sending samples.
+func (h *Hub) offlineWatchdog(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			h.tickOfflineWatchdog(ctx)
+		}
+	}
+}
+
+func (h *Hub) tickOfflineWatchdog(ctx context.Context) {
+	hosts, err := h.store.ListHosts(ctx)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, host := range hosts {
+		cfg, _ := h.store.GetHostConfig(ctx, host.ID)
+		// Stale threshold: 2× the sample interval, clamped to >=30s. Gives
+		// remote agents room to reconnect through a transient network blip.
+		threshold := time.Duration(cfg.SampleIntervalS) * 2 * time.Second
+		if threshold < 30*time.Second {
+			threshold = 30 * time.Second
+		}
+		stale := now.Sub(host.LastSeen) > threshold
+
+		h.mu.Lock()
+		prev := h.latestStatus[host.ID]
+		var next string
+		if stale {
+			next = "offline"
+		} else if prev == "offline" {
+			// Was offline, now within threshold but no fresh sample yet:
+			// leave as-is; ingestLoop will reclassify on the next sample.
+			h.mu.Unlock()
+			continue
+		} else {
+			h.mu.Unlock()
+			continue
+		}
+		if prev == next {
+			h.mu.Unlock()
+			continue
+		}
+		h.latestStatus[host.ID] = next
+		h.mu.Unlock()
+
+		h.broadcastSSE(SSEEvent{
+			Type:   "host_status",
+			HostID: host.ID,
+			Ts:     now.Unix(),
+			Status: next,
+		})
+		if h.evaluator != nil {
+			h.evaluator.EvaluateStatus(ctx, host.ID, now)
+		}
+	}
 }
 
 func (h *Hub) ingestLoop(ctx context.Context) {
@@ -425,6 +506,12 @@ func (h *Hub) ingestLoop(ctx context.Context) {
 					Ts:     s.Timestamp.Unix(),
 					Status: newStatus,
 				})
+				// Fire any host.status rules that match the new state.
+				// Pending/firing state lives in the evaluator; calling on
+				// every transition (not every sample) keeps the noise down.
+				if h.evaluator != nil {
+					h.evaluator.EvaluateStatus(ctx, s.HostID, s.Timestamp)
+				}
 			}
 		}
 	}

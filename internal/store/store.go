@@ -1008,8 +1008,10 @@ func (s *Store) ContainerMetricRange(ctx context.Context, hostID, containerID st
 // --- per-host monitoring config ---
 
 // DefaultHostConfig returns the built-in defaults used when a host has no
-// host_config row. Mirrors the column defaults in schema.sql so behavior
-// matches whether the row exists or not.
+// host_config row and no user-set "monitoring.defaults" override. Mirrors the
+// column defaults in schema.sql so behavior matches whether the row exists
+// or not. Prefer GetEffectiveDefaults when you need user-customizable
+// defaults from user_settings.
 func DefaultHostConfig(hostID string) types.HostConfig {
 	return types.HostConfig{
 		HostID:             hostID,
@@ -1027,17 +1029,70 @@ func DefaultHostConfig(hostID string) types.HostConfig {
 	}
 }
 
-// GetHostConfig returns the per-host monitoring policy, or the built-in
-// defaults if no row exists for hostID. Never returns (nil, nil) — callers
-// always get a usable config.
+// GetMonitoringDefaults returns the user-customizable global defaults applied
+// to hosts that don't have their own host_config row. Stored as a JSON blob
+// under user_settings['monitoring.defaults']. Falls back to the built-in
+// DefaultHostConfig when the key is unset or unparseable.
+func (s *Store) GetMonitoringDefaults(ctx context.Context) (types.HostConfig, error) {
+	base := DefaultHostConfig("")
+	raw, err := s.UserSetting(ctx, "monitoring.defaults")
+	if err != nil {
+		return base, err
+	}
+	if raw == "" {
+		return base, nil
+	}
+	var stored types.HostConfig
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		// Don't poison the request path on a malformed setting — just log via
+		// returning the built-in defaults. Caller can decide what to do.
+		return base, nil
+	}
+	stored.HostID = ""
+	// Defensive: keep slices/maps non-nil so JSON serialization stays clean.
+	if stored.EnabledFamilies == nil {
+		stored.EnabledFamilies = base.EnabledFamilies
+	}
+	if stored.FamilyIntervals == nil {
+		stored.FamilyIntervals = map[string]int{}
+	}
+	if stored.RetentionOverrides == nil {
+		stored.RetentionOverrides = map[string]int{}
+	}
+	if stored.MemCalc == "" {
+		stored.MemCalc = base.MemCalc
+	}
+	return stored, nil
+}
+
+// SetMonitoringDefaults persists the user-customizable global defaults.
+// Stored as JSON so the field set can evolve without schema migrations.
+func (s *Store) SetMonitoringDefaults(ctx context.Context, cfg types.HostConfig) error {
+	cfg.HostID = "" // defaults aren't host-scoped
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return s.SetUserSetting(ctx, "monitoring.defaults", string(raw))
+}
+
+// GetHostConfig returns the per-host monitoring policy, or the effective
+// defaults if no row exists for hostID. Resolution order:
+//  1. host_config row (per-host overrides)
+//  2. user_settings['monitoring.defaults'] (user-customizable global defaults)
+//  3. DefaultHostConfig() (built-in fallback)
+// Never returns (nil, nil) — callers always get a usable config.
 func (s *Store) GetHostConfig(ctx context.Context, hostID string) (types.HostConfig, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT sample_interval_s, enabled_families, family_intervals, filters, mem_calc,
 		       retention_days, retention_overrides, primary_sensor, primary_mount,
 		       warn_cpu, crit_cpu, warn_mem, crit_mem, warn_disk, crit_disk, warn_temp, crit_temp, updated_at
 		FROM host_config WHERE host_id = ?`, hostID)
+	// Start from the user-set global defaults rather than the hardcoded ones,
+	// so a host without a row still picks up admin-configured thresholds.
+	cfg, _ := s.GetMonitoringDefaults(ctx)
+	cfg.HostID = hostID
 	var (
-		cfg                = DefaultHostConfig(hostID)
 		familiesJSON       string
 		intervalsJSON      string
 		filtersJSON        string

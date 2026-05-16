@@ -14,14 +14,8 @@
 
 	async function load() {
 		try {
-			const hosts = await api.hosts.list();
-			const metricResults = await Promise.allSettled(hosts.map((h) => api.latest(h.id)));
-			const sampleMap: Record<string, any> = {};
-			hosts.forEach((h, i) => {
-				const r = metricResults[i];
-				if (r.status === 'fulfilled' && r.value) sampleMap[h.id] = r.value;
-			});
-			hostStore.setAll(hosts, sampleMap);
+			const overview = await api.monitoring.overview();
+			hostStore.hydrate(overview);
 			error = null;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load hosts';
@@ -32,7 +26,9 @@
 
 	onMount(() => {
 		load();
-		pollTimer = setInterval(load, 5000);
+		// SSE on dashboard handles live updates; this page is a dense table
+		// view where 30s reconciliation is sufficient.
+		pollTimer = setInterval(load, 30_000);
 	});
 
 	onDestroy(() => clearInterval(pollTimer));

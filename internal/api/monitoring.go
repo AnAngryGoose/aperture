@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -258,38 +259,28 @@ func (s *Server) monitoringCatalog(w http.ResponseWriter, _ *http.Request) {
 		ScalarMetrics:   alerts.SupportedMetrics,
 		AlertCategories: alerts.MetricCategories,
 		AlertOps:        alerts.SupportedOps,
-		Templates: []alertTemplate{
-			{
-				Name:        "Beszel defaults",
-				Description: "Common thresholds matching the Beszel out-of-the-box rule set.",
-				Rules: []alertTemplateRule{
-					{Metric: "cpu_pct", Op: ">", Threshold: 90, DurationS: 60, Severity: "warning"},
-					{Metric: "mem_pct", Op: ">", Threshold: 90, DurationS: 60, Severity: "warning"},
-					{Metric: "disk_pct", Op: ">", Threshold: 85, DurationS: 300, Severity: "warning"},
-					{Metric: "temp.max", Op: ">", Threshold: 80, DurationS: 60, Severity: "critical"},
-				},
-			},
-			{
-				Name:        "Aggressive",
-				Description: "Lower thresholds and shorter durations for environments that should never spike.",
-				Rules: []alertTemplateRule{
-					{Metric: "cpu_pct", Op: ">", Threshold: 75, DurationS: 30, Severity: "warning"},
-					{Metric: "mem_pct", Op: ">", Threshold: 80, DurationS: 30, Severity: "warning"},
-					{Metric: "disk_pct", Op: ">", Threshold: 75, DurationS: 60, Severity: "warning"},
-				},
-			},
-			{
-				Name:        "Quiet",
-				Description: "Higher thresholds for noisy workloads where short spikes are normal.",
-				Rules: []alertTemplateRule{
-					{Metric: "cpu_pct", Op: ">", Threshold: 95, DurationS: 300, Severity: "warning"},
-					{Metric: "mem_pct", Op: ">", Threshold: 95, DurationS: 300, Severity: "warning"},
-					{Metric: "disk_pct", Op: ">", Threshold: 92, DurationS: 600, Severity: "warning"},
-				},
-			},
-		},
+		Templates:       buildCatalogTemplates(),
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// buildCatalogTemplates maps the canonical template registry in
+// internal/alerts/templates.go onto the catalog wire shape. Keeping the
+// alerts package free of API-layer types means we map fields explicitly here.
+func buildCatalogTemplates() []alertTemplate {
+	src := alerts.Templates()
+	out := make([]alertTemplate, len(src))
+	for i, t := range src {
+		rules := make([]alertTemplateRule, len(t.Rules))
+		for j, r := range t.Rules {
+			rules[j] = alertTemplateRule{
+				Metric: r.Metric, Op: r.Op, Threshold: r.Threshold,
+				DurationS: r.DurationS, Severity: r.Severity,
+			}
+		}
+		out[i] = alertTemplate{Name: t.Name, Description: t.Description, Rules: rules}
+	}
+	return out
 }
 
 // hostConfig handlers: GET returns the per-host monitoring policy (or
@@ -323,6 +314,67 @@ func (s *Server) putHostConfig(w http.ResponseWriter, r *http.Request) {
 	if err := s.hub.PushConfigToAgent(r.Context(), id); err != nil {
 		// Logged via hub; expose so the user knows the agent didn't apply.
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warning": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// applyAlertTemplate POSTs a named template's rules into alert_rules. Body
+// shape: {template:"Beszel defaults", host_id:"abc..." | null}. host_id null
+// = global rules. Returns the created rule IDs.
+func (s *Server) applyAlertTemplate(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		Template string  `json:"template"`
+		HostID   *string `json:"host_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if p.Template == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("template is required"))
+		return
+	}
+	tpl := alerts.TemplateByName(p.Template)
+	if tpl == nil {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("unknown template %q", p.Template))
+		return
+	}
+	created, err := alerts.ApplyTemplate(r.Context(), s.hub.Store(), *tpl, p.HostID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if s.evaluator != nil && len(created) > 0 {
+		s.evaluator.Invalidate()
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"template":    p.Template,
+		"created":     created,
+		"created_n":   len(created),
+		"skipped_n":   len(tpl.Rules) - len(created),
+	})
+}
+
+// Global monitoring defaults: shared across all hosts that don't have a
+// host_config row. Edited from the Settings page.
+func (s *Server) getMonitoringDefaults(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.hub.Store().GetMonitoringDefaults(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) putMonitoringDefaults(w http.ResponseWriter, r *http.Request) {
+	var cfg types.HostConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.hub.Store().SetMonitoringDefaults(r.Context(), cfg); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

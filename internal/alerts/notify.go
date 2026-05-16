@@ -128,33 +128,19 @@ func BuildSender(ch types.AlertChannel) (Sender, error) {
 	return buildSender(ch)
 }
 
-// buildSender constructs the appropriate Sender for a channel.
+// buildSender constructs the appropriate Sender for a channel. Discord,
+// Slack, Ntfy, Gotify, and the native "shoutrrr" type all dispatch through
+// Shoutrrr (see ch_shoutrrr.go for URL translation). Webhook keeps its
+// dedicated sender because its JSON-POST body shape doesn't map cleanly
+// onto Shoutrrr's generic:// service.
 func buildSender(ch types.AlertChannel) (Sender, error) {
 	switch ch.Type {
-	case "discord":
-		var cfg DiscordConfig
-		if err := json.Unmarshal(ch.Config, &cfg); err != nil {
-			return nil, fmt.Errorf("discord config: %w", err)
+	case "discord", "slack", "ntfy", "gotify", "shoutrrr":
+		surl, err := ToShoutrrrURL(channelAdapter{ch})
+		if err != nil {
+			return nil, err
 		}
-		return &DiscordSender{cfg: cfg}, nil
-	case "slack":
-		var cfg SlackConfig
-		if err := json.Unmarshal(ch.Config, &cfg); err != nil {
-			return nil, fmt.Errorf("slack config: %w", err)
-		}
-		return &SlackSender{cfg: cfg}, nil
-	case "ntfy":
-		var cfg NtfyConfig
-		if err := json.Unmarshal(ch.Config, &cfg); err != nil {
-			return nil, fmt.Errorf("ntfy config: %w", err)
-		}
-		return &NtfySender{cfg: cfg}, nil
-	case "gotify":
-		var cfg GotifyConfig
-		if err := json.Unmarshal(ch.Config, &cfg); err != nil {
-			return nil, fmt.Errorf("gotify config: %w", err)
-		}
-		return &GotifySender{cfg: cfg}, nil
+		return &ShoutrrrSender{URL: surl}, nil
 	case "webhook":
 		var cfg WebhookConfig
 		if err := json.Unmarshal(ch.Config, &cfg); err != nil {
@@ -164,6 +150,14 @@ func buildSender(ch types.AlertChannel) (Sender, error) {
 	}
 	return nil, fmt.Errorf("unknown channel type %q", ch.Type)
 }
+
+// channelAdapter satisfies the small channelLike interface used by
+// ToShoutrrrURL without forcing ch_shoutrrr.go to depend on the full
+// types package.
+type channelAdapter struct{ ch types.AlertChannel }
+
+func (a channelAdapter) GetType() string   { return a.ch.Type }
+func (a channelAdapter) GetConfig() []byte { return a.ch.Config }
 
 // fmtNotifTitle builds a short one-line title for a notification.
 func fmtNotifTitle(n Notification) string {
