@@ -377,7 +377,22 @@ Typed HTTP client. The base URL is resolved at build time:
 
 Every method delegates to one of four private helpers (`get`, `post`, `del`, `send`) that throw on non-2xx with the response body included so UI error messages stay informative. `send` is a JSON-bodied helper used by `POST /alerts/rules` and `PUT /alerts/rules/{id}` — it sets `Content-Type` and stringifies the body so route call sites stay short.
 
-Alert-related methods: `alertMetadata`, `alertRules(hostID?)`, `createAlertRule(rule)`, `updateAlertRule(id, rule)`, `deleteAlertRule(id)`, `alertEvents({hostID?, openOnly?, limit?})`. The events query helper builds a `URLSearchParams` so callers don't worry about encoding. Container methods: `createContainer(hostID, spec)` returns `{id, warning?}`; `containerInspect(hostID, cid)` returns `ContainerInspect`; `containerUpdateResources(hostID, cid, update)` uses PUT and returns `{ok: boolean}`; `containerRecreate(hostID, cid)` returns `{id, warning?}`. History methods: `netHistory(id, range, points)` → `NetIfaceHistory`, `diskMountHistory(id, range, points)` → `DiskMountHistory`, `diskIOHistory(id, range, points)` → `DiskIOHistory`.
+Alert-related methods: `alertMetadata`, `alertRules(hostID?)`, `createAlertRule(rule)`, `updateAlertRule(id, rule)`, `deleteAlertRule(id)`, `alertEvents({hostID?, openOnly?, limit?})`, **`applyAlertTemplate(template, hostID?)`** (v0.4.1, returns `{template, created:[ids], created_n, skipped_n}`). The events query helper builds a `URLSearchParams` so callers don't worry about encoding. Container methods: `createContainer(hostID, spec)` returns `{id, warning?}`; `containerInspect(hostID, cid)` returns `ContainerInspect`; `containerUpdateResources(hostID, cid, update)` uses PUT and returns `{ok: boolean}`; `containerRecreate(hostID, cid)` returns `{id, warning?}`. History methods: `netHistory(id, range, points)` → `NetIfaceHistory`, `diskMountHistory(id, range, points)` → `DiskMountHistory`, `diskIOHistory(id, range, points)` → `DiskIOHistory`.
+
+**v0.4.1 monitoring spine methods** live under `api.monitoring.*` and `api.hostConfig.*`:
+
+- `api.monitoring.overview()` → `MonitoringOverview` (hosts + latest + container counts + open alerts + status).
+- `api.monitoring.catalog()` → `MonitoringCatalog` (families, scalar metrics, alert categories+leaves, templates).
+- `api.monitoring.bundle(hostID, range='1h', points=300, include?)` → `MonitoringBundle` (host + latest + config + history + open alerts in one fetch).
+- `api.hostConfig.get(hostID)` / `api.hostConfig.put(hostID, cfg)` — per-host monitoring policy.
+- `api.monitoringDefaults.get()` / `api.monitoringDefaults.put(cfg)` — global defaults edited from Settings.
+- `api.tempHistory`, `api.cpuCoreHistory`, `api.processHistory(hostID, name, ...)`, `api.containerMetricsHistory(hostID, cid, ...)` — per-metric drill-in history.
+
+The dashboard and host detail page use the aggregated endpoints as their primary data source; the older per-host endpoints stay for single-slice fetches.
+
+### `src/lib/monitoring/metricCatalog.ts`
+
+The single source of truth for "what scalar metrics can be displayed on a dashboard card." Each `MetricSpec` carries `key`, `label`, `category`, `unit`, `format` (one-decimal default or unit-aware), `color`, `resolve(sample)`, and a description. `SCALAR_METRICS` enumerates the 11 currently-supported scalars (cpu_pct, mem_pct, disk_pct, swap_pct, load_1, load_5, net_rx_rate, net_tx_rate, temp_max, mem_used, uptime). `DEFAULT_WIDGETS` is the four-metric set used when a host has no per-host override in `dashboardLayout.cardWidgets`. `metricsByCategory()` groups specs for the picker UI. The frontend layers this with the backend's `/api/monitoring/catalog` for the rule editor (which carries the full backend-authoritative list, including dotted-target categories).
 
 ### `src/lib/format.ts`
 
