@@ -355,7 +355,32 @@ export interface MonitoringOverview {
 	containers: Record<string, ContainerCounts>;
 	openAlerts: Record<string, number>;
 	status: Record<string, HostStatus>;
+	/**
+	 * Flat list of currently-open alert events pre-joined with their rule's
+	 * metric / op / threshold / severity. The dashboard renders these in the
+	 * Needs Attention panel without a second fetch. The `openAlerts` count
+	 * map and this list come from the same backend query, so the count and
+	 * the list cannot disagree. Capped at 50 by the server.
+	 */
+	events: OverviewAlertEvent[];
 	ts: number;
+}
+
+/**
+ * One open alert event, pre-joined with its rule so the frontend can render
+ * a meaningful "Alert: <metric> <op> <threshold>" row without an extra
+ * /api/alerts/rules round-trip.
+ */
+export interface OverviewAlertEvent {
+	event_id: number;
+	rule_id: number;
+	host_id: string;
+	metric: string;
+	op: string;
+	threshold: number;
+	severity: 'info' | 'warning' | 'critical' | '';
+	value: number;
+	fired_at: string;
 }
 
 export interface TempHistory {

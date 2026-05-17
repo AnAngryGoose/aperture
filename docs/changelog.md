@@ -549,6 +549,54 @@ Wave 1 — Correctness pass. Fixes silent alert failures, terminal double-encodi
 
 ---
 
+## [0.4.1-alpha.2] — 2026-05-16
+
+Dashboard cleanup pass on top of the v0.4.1 monitoring rewrite. Surfaces a unified "what needs my attention right now" view, fixes the data-model split between the page-header summary strip and the issue list, and brings the host card up to prototype parity.
+
+### Added — Needs Attention panel
+
+- **`web/src/lib/components/dashboard/NeedsAttention.svelte`** (new) — compact panel between PageHeader and FilterBar listing every active issue grouped by severity (critical first, then warning). Rows show `host · reason · metric/value` with click-through to the relevant detail surface. Top-5 visible; "View all issues · +N more" footer linking to `/alerts` when more exist. Empty state: "No issues detected." Critical rows tint the panel border toward `--crit` via `color-mix`. **Why:** the dashboard previously buried the "what's wrong" answer in card-by-card scanning — operators had to read every host's status dot to know if anything needed work.
+- **`web/src/lib/monitoring/issues.ts`** (new) — single source of truth for what counts as an issue. Exports `deriveIssues(entries, events)` returning a typed `Issue[]` (offline, unhealthy_containers, alert, cpu/mem/temp/disk breach) and `summarize(entries, events)` returning the values PageHeader needs. Both `NeedsAttention` and `PageHeader` consume the same module, so the OPEN ALERTS count and the alert rows in NeedsAttention literally count the same array — they cannot disagree. **Why:** the v0.4.1 alpha-1 store split between `host.open_alerts` (legacy) and `entry.openAlerts` (new) caused a silent "count says 0 / list shows 1" failure mode that was only patched by syncing the two fields. Centralizing the derivation makes the class of bug structurally impossible going forward.
+- **Per-issue click target** — each `Issue` carries an `href`: CPU → `/hosts/{id}#cpu`, memory → `#memory`, disk → `#disk`, sensors → `#sensors`, alert event → `#events`, unhealthy containers → `/hosts/{id}/containers`, offline → `/hosts/{id}`. The host detail page reads `location.hash` on mount and selects the matching tab, so a "High CPU" issue lands the user directly on the CPU tab.
+
+### Added — RichCard prototype-parity overhaul
+
+- **Status label text** next to the existing dot ("Healthy" / "Warning" / "Critical" / "Offline") colored to match the rail.
+- **Consolidated rich mono meta line** under the name: OS+version · OS/arch · CPU model · core count · RAM total · (agent version when known) · uptime. Parts gracefully drop when empty so an agent-less host still renders cleanly.
+- **Per-metric sub-text** below each value: CPU shows `{cores} cores · {maxTemp}°C` (sources the hottest live sensor); MEM shows `{used} / {total}`; NET shows the opposite-direction rate (`↑ {tx}` on the RX row, `↓ {rx}` on the TX row); DISK shows `{used} / {total} · {device} · {fstype}` from the largest mount; SWAP shows used/total or "no swap"; LOAD shows `{cores} cores` as the denominator; TEMP shows `{n} sensors`.
+- **DISK rendered as a Meter bar** instead of a sparkline placeholder — matches the prototype's wide-bar treatment.
+- **Side panel** restructured into two stacked sections: a richer Containers block (`Containers  N TOTAL` header + 3-stat grid running/stopped/unhealthy) for docker hosts, plus a new TOP BY CPU panel listing up to 4 processes with `name | cpu% | mem`. Non-docker hosts get the top-procs panel alone.
+- **HostGrid min width bumped** 560px → 620px so the 240px side column doesn't squeeze the metric area.
+
+### Added — Backend overview events
+
+- **`internal/api/monitoring.go`** — `monitoringOverview` response now includes `events: []overviewAlertEvent` — currently-open alert events pre-joined with their rule's metric/op/threshold/severity. Capped at 50 by the server. The same `ListAlertEvents` query that populates the per-host `openAlerts` count map also feeds this list, so the count and the list are guaranteed to match. **Why:** alert rows in the Needs Attention panel need to show the rule title ("Alert: cpu_pct > 90") and current value, not just a "N open alerts" summary. Doing the join server-side avoids a second `/api/alerts/rules` fetch on every dashboard load.
+
+### Added — Frontend types + store
+
+- **`web/src/lib/types.ts`** — new `OverviewAlertEvent` interface mirroring the backend join. `MonitoringOverview.events` field added.
+- **`web/src/lib/stores/monitoring.svelte.ts`** — new `events` reactive field populated from `overview.events` on hydrate, exposed via getter. Consumers (NeedsAttention, PageHeader, dashboard nudge handler) read from the same array.
+- **Dashboard alert nudge** — `web/src/routes/dashboard/+page.svelte` now `$effect`s on `monitoringStore.alertNudge` (incremented by the `alert` SSE event) and re-fetches the overview, throttled to once per second. A new alert lands with full details in NeedsAttention within ~1s rather than waiting for the 30s reconcile.
+
+### Added — Host detail URL hash → tab routing
+
+- **`web/src/routes/hosts/[id]/+page.svelte`** reads `window.location.hash` on mount and selects the matching tab (one of `overview`/`cpu`/`memory`/`disk`/`network`/`sensors`/`processes`/`docker`/`events`/`settings`). Used by Needs Attention click targets and intended for any future deep-link surface.
+
+### Fixed
+
+- **Infinite reactive loop on the host detail page** — the post-rewrite host page had a `$effect` that read `bundle` for its guard while `load()` reassigned `bundle`, so each successful fetch re-invalidated the effect, which re-fetched, and so on. Throttled only by HTTP+JSON roundtrip latency (~2 ms), the page issued ~120 GET/sec. Replaced with a `lastFetchKey`-guarded effect that depends only on `id` and `range`; removed the duplicate `onMount` `load()` call. Verified end-to-end against a real hub: 35s of idle browser-free runtime now produces 1 bundle request (the manual one I issued by hand), not thousands.
+- **Six dashboard readers silently returning 0 for `host.open_alerts`** — the v0.4.1 monitoring rewrite moved open-alert counts to `entry.openAlerts` (populated by the overview endpoint's `openAlerts` map), but the legacy `host.open_alerts` field was never folded back onto the Host row. PageHeader's OPEN ALERTS stat, the Sidebar alert badge, FilterBar's "alerts" tab visibility, HostGrid's "alerts" filter, RichCard's alert footer, TileCard's alert pill, and the `/hosts` page all read the legacy field and saw 0. `monitoringStore.hydrate` and the `alert` SSE handler now mirror the new count onto `host.open_alerts` so the legacy readers light back up without a 6-file refactor.
+- **PageHeader containers/unhealthy counts always 0** — a separate latent bug surfaced by the screenshot: the totals loop declared `running`, `total`, `unhealthy` but never incremented them, and the Containers stat was hardcoded to `—`. Loop now sums `entry.containers` across all hosts; the Containers stat renders `running/total` (green numerator) when data exists.
+- **Orphaned smoke-test hub processes** — five `/tmp/hub_*` binaries from my repeated smoke-test runs over the prior session leaked at 7–10 % CPU each (combined ~45 % CPU + ~150 MB RAM for ~24 h) because `kill $HUB; wait $HUB` patterns silently failed in fresh shell contexts where `$HUB` was empty. Killed them and replaced the pattern with `pkill -f hub_<unique-tag>` for future tests. (Not a code change — operational cleanup noted here so it's not forgotten.)
+
+### Changed
+
+- **PageHeader counts derive from `summarize(entries, events)`** instead of an inline loop. Same numbers, but the OPEN ALERTS column now structurally cannot drift from NeedsAttention.
+- **NeedsAttention rows are `<a href={issue.href}>`** instead of `<button>` + callback — supports right-click "open in new tab", middle-click, etc., and removes the need for an `onselect` callback prop.
+- **Alerts page poll interval** lowered to 15s (was 5s) — aggressive 5s polling on a viewable-but-not-critical page was a relic from before the SSE pipeline carried alert events.
+
+---
+
 ## [0.4.1-alpha.1] — 2026-05-15
 
 Monitoring rewrite for Beszel parity. Six-compartment effort: backend foundation (efficiency wins + new schema + collector families + typed SSE + agent config push + extended alert vocabulary), aggregated monitoring API, dashboard data-flow refactor, full host detail page rewrite, DrillIn enrichments + dashboard widget config, and alerts expansion (status alerts, Shoutrrr migration, templates, two-step rule editor).

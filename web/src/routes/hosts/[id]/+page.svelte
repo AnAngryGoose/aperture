@@ -83,6 +83,14 @@
 
 	onMount(() => {
 		range = initialRange();
+		// Deep-link to a tab via URL hash (e.g. /hosts/{id}#cpu, #events).
+		// Used by the dashboard's Needs Attention rows so a "High CPU" issue
+		// lands directly on the CPU tab rather than Overview.
+		const hash = (typeof window !== 'undefined' ? window.location.hash : '').replace(/^#/, '');
+		const validTabs: TabKey[] = ['overview', 'cpu', 'memory', 'disk', 'network', 'sensors', 'processes', 'docker', 'events', 'settings'];
+		if (hash && (validTabs as string[]).includes(hash)) {
+			activeTab = hash as TabKey;
+		}
 		// 30s reconciliation — SSE handles live samples; this poll only fills
 		// in history gaps after disconnects or missed events.
 		pollTimer = setInterval(load, 30_000);

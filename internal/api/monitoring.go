@@ -30,12 +30,18 @@ import (
 // counts + open alert counts + status. After this, the dashboard relies on
 // SSE for live updates and a slow (30s) reconciliation re-fetch.
 type monitoringOverview struct {
-	Hosts      []types.Host                  `json:"hosts"`
+	Hosts      []types.Host                   `json:"hosts"`
 	Latest     map[string]*types.MetricSample `json:"latest"`
 	Containers map[string]containerCountsDTO  `json:"containers"`
 	OpenAlerts map[string]int                 `json:"openAlerts"`
 	Status     map[string]string              `json:"status"`
-	Ts         int64                          `json:"ts"`
+	// Events is the flat list of currently-open alert events joined with
+	// their rule (metric / op / threshold / severity). Capped at 50 — the
+	// dashboard only needs the top few for "Needs Attention" and the count.
+	// Sourced from the same query as `OpenAlerts`, so the count and the list
+	// can never disagree: count = len(filtered for host_id).
+	Events []overviewAlertEvent `json:"events"`
+	Ts     int64                `json:"ts"`
 }
 
 // containerCountsDTO is the wire shape for per-host container summary.
@@ -46,6 +52,23 @@ type containerCountsDTO struct {
 	Stopped   int `json:"stopped"`
 	Unhealthy int `json:"unhealthy"`
 	Total     int `json:"total"`
+}
+
+// overviewAlertEvent is a single open alert event pre-joined with its rule
+// so the frontend can render an "Alert: cpu_pct > 90" row in Needs Attention
+// without a second fetch. The rule's metric / op / threshold / severity are
+// inlined; the event's current `value` lets the row show how far over the
+// threshold the host is.
+type overviewAlertEvent struct {
+	EventID   int64     `json:"event_id"`
+	RuleID    int64     `json:"rule_id"`
+	HostID    string    `json:"host_id"`
+	Metric    string    `json:"metric"`
+	Op        string    `json:"op"`
+	Threshold float64   `json:"threshold"`
+	Severity  string    `json:"severity"`
+	Value     float64   `json:"value"`
+	FiredAt   time.Time `json:"fired_at"`
 }
 
 func (s *Server) monitoringOverview(w http.ResponseWriter, r *http.Request) {
@@ -84,14 +107,42 @@ func (s *Server) monitoringOverview(w http.ResponseWriter, r *http.Request) {
 			out.Status[h.ID] = status
 		}
 	}
-	// Open alert counts per host — one query, group in Go.
+	// Open alerts: one query for events + one query for rules. Group events
+	// by host for the count map AND project them through the rule lookup so
+	// the frontend can render alert details (metric, threshold, severity)
+	// without a follow-up fetch. The count map and the Events slice are
+	// computed from the same source so they cannot disagree.
 	openEvents, err := s.hub.Store().ListAlertEvents(ctx, store.AlertEventFilter{
 		OpenOnly: true,
 		Limit:    10000,
 	})
 	if err == nil {
+		// Build rule lookup once. ListAlertRules(nil) is bounded by the
+		// homelab rule count (dozens at most), so a single pass is cheap.
+		rulesList, _ := s.hub.Store().ListAlertRules(ctx, nil)
+		rulesByID := make(map[int64]types.AlertRule, len(rulesList))
+		for _, r := range rulesList {
+			rulesByID[r.ID] = r
+		}
+		const eventCap = 50
+		out.Events = make([]overviewAlertEvent, 0, len(openEvents))
 		for _, ev := range openEvents {
 			out.OpenAlerts[ev.HostID]++
+			if len(out.Events) >= eventCap {
+				continue // keep counting; stop appending
+			}
+			r := rulesByID[ev.RuleID]
+			out.Events = append(out.Events, overviewAlertEvent{
+				EventID:   ev.ID,
+				RuleID:    ev.RuleID,
+				HostID:    ev.HostID,
+				Metric:    r.Metric,
+				Op:        r.Op,
+				Threshold: r.Threshold,
+				Severity:  r.Severity,
+				Value:     ev.Value,
+				FiredAt:   ev.FiredAt,
+			})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

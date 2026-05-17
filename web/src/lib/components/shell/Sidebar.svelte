@@ -36,7 +36,7 @@
 		</div>
 		<div class="brand-text">
 			<span class="brand-name">Aperture</span>
-			<span class="brand-version mono">v0.4.1-alpha.1</span>
+			<span class="brand-version mono">v0.4.1-alpha.2</span>
 		</div>
 	</a>
 

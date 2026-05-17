@@ -1,22 +1,12 @@
 <script lang="ts">
 	import { hostStore } from '$lib/stores/hosts.svelte';
 	import { fmtAbsolute } from '$lib/format';
+	import { summarize } from '$lib/monitoring/issues';
 
-	const totals = $derived.by(() => {
-		let healthy = 0, warn = 0, crit = 0, offline = 0;
-		let running = 0, total = 0, unhealthy = 0, openAlerts = 0;
-
-		for (const e of Object.values(hostStore.entries)) {
-			if (e.status === 'ok') healthy++;
-			else if (e.status === 'warn') warn++;
-			else if (e.status === 'crit') crit++;
-			else offline++;
-
-			openAlerts += e.host.open_alerts ?? 0;
-		}
-
-		return { healthy, warn, crit, offline, running, total, unhealthy, openAlerts };
-	});
+	// Single derivation: same helper that NeedsAttention's deriveIssues backs.
+	// The OPEN ALERTS column literally counts the events array that drives
+	// the per-alert rows in Needs Attention — they cannot disagree.
+	const totals = $derived(summarize(hostStore.list, hostStore.events));
 
 	const hostCount = $derived(Object.keys(hostStore.entries).length);
 	const syncLabel = $derived(
@@ -46,12 +36,18 @@
 		</div>
 		<div class="stat">
 			<span class="stat-label label-mono">Containers</span>
-			<span class="stat-value mono">—</span>
+			<span class="stat-value mono">
+				{#if totals.containers.total > 0}
+					<span style="color: var(--ok)">{totals.containers.running}</span><span class="ctr-sep">/{totals.containers.total}</span>
+				{:else}
+					—
+				{/if}
+			</span>
 		</div>
 		<div class="stat">
 			<span class="stat-label label-mono">Unhealthy</span>
-			<span class="stat-value mono" style="color: {totals.unhealthy > 0 ? 'var(--crit)' : 'var(--text-dim)'}">
-				{totals.unhealthy}
+			<span class="stat-value mono" style="color: {totals.containers.unhealthy > 0 ? 'var(--crit)' : 'var(--text-dim)'}">
+				{totals.containers.unhealthy}
 			</span>
 		</div>
 		<div class="stat">
@@ -106,5 +102,10 @@
 		font-weight: 500;
 		letter-spacing: -0.02em;
 		line-height: 1;
+	}
+
+	.ctr-sep {
+		color: var(--text-faint);
+		font-size: 13px;
 	}
 </style>

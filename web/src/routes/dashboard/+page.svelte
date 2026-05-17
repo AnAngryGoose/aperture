@@ -4,6 +4,7 @@
 	import { monitoringStore, type HostEntry } from '$lib/stores/monitoring.svelte';
 	import { dashboardLayout } from '$lib/stores/dashboardLayout.svelte';
 	import PageHeader from '$lib/components/dashboard/PageHeader.svelte';
+	import NeedsAttention from '$lib/components/dashboard/NeedsAttention.svelte';
 	import FilterBar from '$lib/components/dashboard/FilterBar.svelte';
 	import HostGrid from '$lib/components/dashboard/HostGrid.svelte';
 	import DrillIn from '$lib/components/host/DrillIn.svelte';
@@ -46,6 +47,19 @@
 		monitoringStore.disconnectSSE();
 	});
 
+	// Alert SSE nudge → refetch the overview so Needs Attention surfaces the
+	// new event's details (metric, threshold, rule severity) instead of just
+	// bumping the count. Throttled to one refresh per second so a burst of
+	// alerts doesn't hammer the overview endpoint.
+	let lastNudgeFetch = 0;
+	$effect(() => {
+		void monitoringStore.alertNudge;
+		const now = Date.now();
+		if (now - lastNudgeFetch < 1000) return;
+		lastNudgeFetch = now;
+		reconcile();
+	});
+
 	function openDrillIn(entry: HostEntry) {
 		selectedEntry = entry;
 	}
@@ -59,6 +73,16 @@
 
 <div class="dashboard">
 	<PageHeader />
+	<!--
+		"Needs Attention" sits above the filters so urgent items stay visible
+		regardless of which tag filter the user has selected on the host grid.
+		Issues are derived from the same overview data the cards consume —
+		entries for metric/container/offline rows, events for alert rows. Both
+		flow through lib/monitoring/issues.ts so PageHeader's counts cannot
+		drift from this panel's rows. Each row links directly to the right
+		detail surface (host tab, /containers, etc.).
+	-->
+	<NeedsAttention entries={monitoringStore.list} events={monitoringStore.events} />
 	<FilterBar onaddhost={() => (showAddHost = true)} />
 	<HostGrid
 		entries={monitoringStore.list}

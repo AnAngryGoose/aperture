@@ -14,6 +14,7 @@ import type {
 	HostStatus,
 	ContainerCounts,
 	MonitoringOverview,
+	OverviewAlertEvent,
 	SSEEnvelope
 } from '$lib/types';
 
@@ -70,6 +71,13 @@ function createMonitoringStore() {
 	let entries = $state<Record<string, HostEntry>>({});
 	let lastSync = $state<Date | null>(null);
 	let alertNudge = $state(0); // bumped on alert SSE; consumers can $effect this
+	// Open alert events from the most recent overview fetch, joined with their
+	// rule (metric/op/threshold/severity). Single source of truth consumed by
+	// both PageHeader (count) and NeedsAttention (rows) via lib/monitoring/issues.
+	// Replaced on each reconcile; an alert SSE bumps `alertNudge` to signal
+	// "you should refetch the overview" to consumers that want fresh events
+	// without waiting for the 30s poll.
+	let events = $state<OverviewAlertEvent[]>([]);
 	let sseSource: EventSource | null = null;
 
 	function upsertFromSample(host: Host, sample: MetricSample | null, serverStatus?: HostStatus) {
@@ -113,6 +121,14 @@ function createMonitoringStore() {
 			const status = overview.status[host.id];
 			const containers = overview.containers[host.id] ?? null;
 			const openAlerts = overview.openAlerts[host.id] ?? 0;
+			// Stamp the legacy `host.open_alerts` field too. Six readers across
+			// the dashboard (Sidebar badge, FilterBar visibility, HostGrid
+			// "alerts" filter, RichCard footer, TileCard pill, /hosts page)
+			// still read this field; the v0.4.1 overview endpoint doesn't
+			// populate it on the Host row, so without this stamp they all
+			// silently see 0. Cheap to mirror — keeps the new and legacy fields
+			// in lockstep without a 6-file refactor.
+			host.open_alerts = openAlerts;
 			// Reuse existing ring buffers if we already had this host so the
 			// reconciliation poll doesn't flatten the sparkline.
 			const prev = entries[host.id];
@@ -132,6 +148,12 @@ function createMonitoringStore() {
 			};
 		}
 		entries = nextEntries;
+		// Replace the events array wholesale — the overview is the source of
+		// truth; any incremental updates from SSE only bump alertNudge to
+		// nudge consumers (the dashboard refetches the overview on nudge for
+		// fresh event details). Falls back to [] if the backend hasn't been
+		// updated to include events yet.
+		events = overview.events ?? [];
 		lastSync = new Date();
 	}
 
@@ -174,11 +196,16 @@ function createMonitoringStore() {
 					}
 					case 'alert': {
 						// Bump the alert counter — list view consumers can react.
+						// Mirror the change onto host.open_alerts so the legacy
+						// readers (Sidebar badge, RichCard footer, etc.) stay
+						// in sync without a separate broadcast path.
+						const nextCount = env.alert.resolved
+							? Math.max(0, entry.openAlerts - 1)
+							: entry.openAlerts + 1;
 						entries[env.hostId] = {
 							...entry,
-							openAlerts: env.alert.resolved
-								? Math.max(0, entry.openAlerts - 1)
-								: entry.openAlerts + 1
+							host: { ...entry.host, open_alerts: nextCount },
+							openAlerts: nextCount
 						};
 						alertNudge = alertNudge + 1;
 						break;
@@ -204,6 +231,7 @@ function createMonitoringStore() {
 		get list() { return Object.values(entries); },
 		get lastSync() { return lastSync; },
 		get alertNudge() { return alertNudge; },
+		get events() { return events; },
 		hydrate,
 		connectSSE,
 		disconnectSSE

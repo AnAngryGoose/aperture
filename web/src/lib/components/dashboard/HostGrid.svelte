@@ -70,7 +70,10 @@
 <style>
 	.grid-rich {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
+		/* Rich cards now have a 240px side column for containers + top-by-cpu
+		   panels alongside the metric rows; bumped from 560px → 620px so the
+		   metric column doesn't squeeze. */
+		grid-template-columns: repeat(auto-fit, minmax(620px, 1fr));
 		gap: 14px;
 	}
 
