@@ -36,32 +36,36 @@
 	</div>
 
 	<div class="metrics">
-		<div class="metric">
+		<a class="metric" href="/hosts/{entry.host.id}/cpu" onclick={(e) => e.stopPropagation()}>
 			<span class="metric-label label-mono">CPU</span>
 			<span class="metric-val mono">{(s?.cpu_percent ?? 0).toFixed(0)}%</span>
 			<Sparkline data={entry.cpuSeries} width={120} height={22} color="var(--accent)" />
-		</div>
-		<div class="metric">
+		</a>
+		<a class="metric" href="/hosts/{entry.host.id}/memory" onclick={(e) => e.stopPropagation()}>
 			<span class="metric-label label-mono">MEM</span>
 			<span class="metric-val mono">{(s?.mem_percent ?? 0).toFixed(0)}%</span>
 			<Sparkline data={entry.memSeries} width={120} height={22} color="var(--accent)" />
-		</div>
-		<div class="metric">
+		</a>
+		<a class="metric" href="/hosts/{entry.host.id}/network" onclick={(e) => e.stopPropagation()}>
 			<span class="metric-label label-mono">NET ↓</span>
 			<span class="metric-val mono">{fmtRate(entry.netInRate)}</span>
 			<Sparkline data={entry.netInSeries} width={120} height={22} color="var(--info)" />
-		</div>
-		<div class="metric">
+		</a>
+		<a class="metric" href="/hosts/{entry.host.id}/sensors" onclick={(e) => e.stopPropagation()}>
 			<span class="metric-label label-mono">TEMP</span>
 			<span class="metric-val mono">—°</span>
 			<div style="height:22px;"></div>
-		</div>
+		</a>
 	</div>
 
 	<div class="footer mono">
 		{s?.uptime_secs ? `up ${fmtDuration(s.uptime_secs)}` : '—'}
 		{#if (entry.host.open_alerts ?? 0) > 0}
-			<span style="color:var(--warn)"> · {entry.host.open_alerts} alerts</span>
+			<a
+				class="alert-link mono"
+				href="/hosts/{entry.host.id}/events"
+				onclick={(e) => e.stopPropagation()}
+			> · {entry.host.open_alerts} alerts</a>
 		{/if}
 	</div>
 </div>
@@ -118,7 +122,20 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
+		text-decoration: none;
+		color: inherit;
+		padding: 4px;
+		margin: -4px;
+		border-radius: var(--r-sm);
+		transition: background 100ms;
 	}
+	.metric:hover { background: var(--bg-hover, transparent); }
+
+	.alert-link {
+		color: var(--warn);
+		text-decoration: none;
+	}
+	.alert-link:hover { text-decoration: underline; }
 
 	.metric-label { font-size: 10px; }
 	.metric-val { font-size: 16px; font-weight: 500; letter-spacing: -0.02em; }

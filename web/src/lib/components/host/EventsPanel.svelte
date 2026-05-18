@@ -4,6 +4,12 @@
 
 	interface Props {
 		events: AlertEvent[];
+		/**
+		 * Optional — accepted for API symmetry with the dashboard drawer's
+		 * usage. The drawer wraps this whole panel in a link, so rows here
+		 * stay non-interactive to avoid nested anchors.
+		 */
+		hostId?: string;
 	}
 
 	let { events }: Props = $props();

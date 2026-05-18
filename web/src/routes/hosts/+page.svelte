@@ -34,7 +34,7 @@
 	onDestroy(() => clearInterval(pollTimer));
 
 	function open(entry: HostEntry) {
-		goto(`/hosts/${entry.host.id}`);
+		goto(`/hosts/${entry.host.id}/overview`);
 	}
 
 	function kindOf(entry: HostEntry): 'docker' | 'linux' | 'edge' {

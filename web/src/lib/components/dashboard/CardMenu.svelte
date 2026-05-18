@@ -21,9 +21,9 @@
 <div class="menu" onclick={stop}>
 	<button class="item" onclick={configure}>Configure widget…</button>
 	<button class="item" onclick={onclose}>Pin to dashboard</button>
-	<a class="item" href="/hosts/{entry.host.id}" onclick={onclose}>Open full monitoring →</a>
+	<a class="item" href="/hosts/{entry.host.id}/overview" onclick={onclose}>Open full monitoring →</a>
+	<a class="item" href="/hosts/{entry.host.id}/shell" onclick={onclose}>Open shell</a>
 	<div class="sep"></div>
-	<button class="item" onclick={onclose}>Open shell</button>
 	<button class="item" onclick={onclose}>Restart host</button>
 	<div class="sep"></div>
 	<button class="item danger" onclick={onclose}>Remove host</button>

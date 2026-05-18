@@ -148,7 +148,7 @@
 
 <div class="page-header">
 	<div>
-		<a href={`/hosts/${id}`} class="back">← back to host</a>
+		<a href={`/hosts/${id}/overview`} class="back">← back to host</a>
 		<h1>Images</h1>
 		<div class="muted small">{images.length} total</div>
 	</div>
@@ -157,9 +157,9 @@
 
 <!-- Sub-navigation -->
 <nav class="subnav">
-	<a href={`/hosts/${id}`}>Overview</a>
+	<a href={`/hosts/${id}/overview`}>Overview</a>
 	<a href={`/hosts/${id}/containers`}>Containers</a>
-	<a href={`/hosts/${id}/compose`}>Compose</a>
+	<a href={`/hosts/${id}/stacks`}>Stacks</a>
 	<a href={`/hosts/${id}/networks`}>Networks</a>
 	<a href={`/hosts/${id}/logs`}>Logs</a>
 	<a href={`/hosts/${id}/volumes`}>Volumes</a>

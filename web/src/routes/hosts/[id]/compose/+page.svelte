@@ -3,16 +3,15 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 
-	// /hosts/:id is canonically /hosts/:id/overview. Redirect at mount time
-	// so deep links, external bookmarks, and stale `/hosts/{id}` references
-	// all land on the new URL.
+	// The compose UI moved to /stacks. Keep this route as a redirect so any
+	// stale links or bookmarks from before the rename still resolve.
 	onMount(() => {
 		const id = page.params.id;
-		if (id) goto(`/hosts/${id}/overview`, { replaceState: true });
+		if (id) goto(`/hosts/${id}/stacks`, { replaceState: true });
 	});
 </script>
 
-<div class="redirect-stub">Loading host…</div>
+<div class="redirect-stub">Redirecting to Stacks…</div>
 
 <style>
 	.redirect-stub {

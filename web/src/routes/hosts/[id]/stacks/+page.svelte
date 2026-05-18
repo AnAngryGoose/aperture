@@ -309,7 +309,7 @@
 <div class="page">
 	<header class="page-header">
 		<div class="header-left">
-			<a href={`/hosts/${id}`} class="back-link">← {hostName}</a>
+			<a href={`/hosts/${id}/overview`} class="back-link">← {hostName}</a>
 			<h1>Compose Stacks</h1>
 		</div>
 		<button class="btn-primary" onclick={() => { newModal = true; newError = ''; }}>+ New Stack</button>
@@ -317,9 +317,9 @@
 
 	<!-- Sub-nav mirrors containers page -->
 	<nav class="sub-nav">
-		<a href={`/hosts/${id}`}>Overview</a>
+		<a href={`/hosts/${id}/overview`}>Overview</a>
 		<a href={`/hosts/${id}/containers`}>Containers</a>
-		<a href={`/hosts/${id}/compose`} class="active">Compose</a>
+		<a href={`/hosts/${id}/stacks`} class="active">Stacks</a>
 		<a href={`/hosts/${id}/networks`}>Networks</a>
 		<a href={`/hosts/${id}/logs`}>Logs</a>
 		<a href={`/hosts/${id}/volumes`}>Volumes</a>

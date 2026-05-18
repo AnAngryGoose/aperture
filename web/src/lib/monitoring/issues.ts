@@ -69,11 +69,12 @@ function eventSeverity(s: string): Severity {
 }
 
 /**
- * Tab anchor on the host-detail page. The host detail page reads
- * location.hash on mount and selects the matching tab.
+ * Path-based deep link into the host detail page. Each monitoring tab is a
+ * real route (e.g. /hosts/{id}/cpu) so refreshing preserves the selection
+ * and the browser's back/forward navigation moves between tabs.
  */
-function hostHref(hostId: string, tab?: string): string {
-	return tab ? `/hosts/${hostId}#${tab}` : `/hosts/${hostId}`;
+function hostHref(hostId: string, tab: string = 'overview'): string {
+	return `/hosts/${hostId}/${tab}`;
 }
 
 export function deriveIssues(entries: HostEntry[], events: OverviewAlertEvent[] = []): Issue[] {
@@ -171,7 +172,9 @@ export function deriveIssues(entries: HostEntry[], events: OverviewAlertEvent[] 
 	// One row per open alert event (from the overview's events array). Each
 	// row shows the rule's metric/op/threshold as the title plus the current
 	// value as the detail. Click → host detail Events tab.
+	const eventHostCounts = new Map<string, number>();
 	for (const ev of events) {
+		eventHostCounts.set(ev.host_id, (eventHostCounts.get(ev.host_id) ?? 0) + 1);
 		const host = byHost.get(ev.host_id);
 		const hostName = host?.host.name ?? ev.host_id;
 		out.push({
@@ -183,6 +186,26 @@ export function deriveIssues(entries: HostEntry[], events: OverviewAlertEvent[] 
 			detail: `value ${formatThreshold(ev.value)}`,
 			href: hostHref(ev.host_id, 'events')
 		});
+	}
+
+	// Fallback alert row: if a host has openAlerts > 0 but we don't have a
+	// matching detail in `events` (SSE bumped the counter before reconcile
+	// refilled events, or the backend capped events at 50 while a host has
+	// more open), surface a generic row so the count and the panel agree.
+	for (const e of entries) {
+		const detailed = eventHostCounts.get(e.host.id) ?? 0;
+		const missing = (e.openAlerts ?? 0) - detailed;
+		if (missing > 0) {
+			out.push({
+				hostId: e.host.id,
+				hostName: e.host.name,
+				severity: 'warn',
+				kind: 'alert',
+				reason: `${missing} open alert${missing === 1 ? '' : 's'}`,
+				detail: '',
+				href: hostHref(e.host.id, 'events')
+			});
+		}
 	}
 
 	// Sort: critical first, then warning. Within a severity tier, group by
@@ -227,6 +250,7 @@ export interface Summary {
 export function summarize(entries: HostEntry[], events: OverviewAlertEvent[] = []): Summary {
 	let healthy = 0, warn = 0, crit = 0, offline = 0;
 	let running = 0, total = 0, unhealthy = 0;
+	let openAlertsLive = 0;
 
 	for (const e of entries) {
 		if (e.status === 'ok') healthy++;
@@ -240,6 +264,8 @@ export function summarize(entries: HostEntry[], events: OverviewAlertEvent[] = [
 			total += c.total;
 			unhealthy += c.unhealthy;
 		}
+
+		openAlertsLive += e.openAlerts ?? 0;
 	}
 
 	// Severity counts on the issue list itself — exposed so the NeedsAttention
@@ -248,10 +274,18 @@ export function summarize(entries: HostEntry[], events: OverviewAlertEvent[] = [
 	const critIssues = issues.filter((i) => i.severity === 'crit').length;
 	const warnIssues = issues.length - critIssues;
 
+	// OPEN ALERTS reflects the SSE-bumped per-host counter, not just the
+	// (capped) events array. An incoming alert SSE updates entry.openAlerts
+	// immediately while the events array only refreshes on the next reconcile
+	// — using the sum keeps the top-strip count in lockstep with the alert
+	// rows NeedsAttention renders (real rows + fallback rows). Floor at
+	// events.length so the strip never UNDERreports rows that are visible.
+	const openAlerts = Math.max(openAlertsLive, events.length);
+
 	return {
 		healthy, warn, crit, offline,
 		containers: { running, total, unhealthy },
-		openAlerts: events.length,
+		openAlerts,
 		totalIssues: issues.length,
 		critIssues,
 		warnIssues

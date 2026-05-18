@@ -259,6 +259,37 @@
 		(entry.containers?.running ?? 0)
 		+ (entry.containers?.stopped ?? 0)
 	);
+
+	// Metric widget key → host detail tab path. Clicking a metric row goes
+	// straight to that tab instead of the generic overview. Anything not in
+	// this map falls back to opening the drawer (the card's onclick handler).
+	const WIDGET_TAB: Record<string, string> = {
+		cpu_pct:    'cpu',
+		mem_pct:    'memory',
+		mem_used:   'memory',
+		swap_pct:   'memory',
+		disk_pct:   'disk',
+		net_rx_rate:'network',
+		net_tx_rate:'network',
+		temp_max:   'sensors',
+		load_1:     'cpu',
+		load_5:     'cpu'
+	};
+
+	function rowHref(key: string): string | null {
+		const tab = WIDGET_TAB[key];
+		return tab ? `/hosts/${entry.host.id}/${tab}` : null;
+	}
+
+	function rowClick(e: MouseEvent, href: string | null) {
+		// Per-metric clicks bypass the card's open-drawer handler so the click
+		// target on a CPU row goes to /cpu rather than opening the drawer.
+		if (!href) return;
+		e.stopPropagation();
+		// Honor modifier keys (cmd-click for new tab) by deferring to the
+		// browser's default anchor behavior — the wrapping <a> element handles
+		// that via href.
+	}
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -305,29 +336,49 @@
 		<!-- Left: metric rows (driven by per-host widget config) -->
 		<div class="metrics">
 			{#each widgetRows as row (row.key)}
-				<div class="metric-row">
-					<span class="metric-label label-mono">{row.label}</span>
-					<div class="metric-vis">
-						{#if row.render === 'sparkline' && row.series && row.series.length > 1}
-							<Sparkline data={row.series} xs={row.ts} color={row.color} height={26} />
-						{:else if row.render === 'meter'}
-							<Meter value={row.pct ?? 0} max={100} height={6} />
-						{/if}
+				{@const href = rowHref(row.key)}
+				{#if href}
+					<a class="metric-row link" {href} onclick={(e) => rowClick(e, href)}>
+						<span class="metric-label label-mono">{row.label}</span>
+						<div class="metric-vis">
+							{#if row.render === 'sparkline' && row.series && row.series.length > 1}
+								<Sparkline data={row.series} xs={row.ts} color={row.color} height={26} />
+							{:else if row.render === 'meter'}
+								<Meter value={row.pct ?? 0} max={100} height={6} />
+							{/if}
+						</div>
+						<div class="metric-vals">
+							<span class="metric-val mono" style="color:{row.color}">{row.value}</span>
+							{#if row.sub}
+								<span class="metric-sub mono">{row.sub}</span>
+							{/if}
+						</div>
+					</a>
+				{:else}
+					<div class="metric-row">
+						<span class="metric-label label-mono">{row.label}</span>
+						<div class="metric-vis">
+							{#if row.render === 'sparkline' && row.series && row.series.length > 1}
+								<Sparkline data={row.series} xs={row.ts} color={row.color} height={26} />
+							{:else if row.render === 'meter'}
+								<Meter value={row.pct ?? 0} max={100} height={6} />
+							{/if}
+						</div>
+						<div class="metric-vals">
+							<span class="metric-val mono" style="color:{row.color}">{row.value}</span>
+							{#if row.sub}
+								<span class="metric-sub mono">{row.sub}</span>
+							{/if}
+						</div>
 					</div>
-					<div class="metric-vals">
-						<span class="metric-val mono" style="color:{row.color}">{row.value}</span>
-						{#if row.sub}
-							<span class="metric-sub mono">{row.sub}</span>
-						{/if}
-					</div>
-				</div>
+				{/if}
 			{/each}
 		</div>
 
 		<!-- Right: container summary + top by CPU -->
 		<aside class="side">
 			{#if kind === 'docker'}
-				<section class="panel containers-panel">
+				<a class="panel containers-panel link" href="/hosts/{entry.host.id}/containers" onclick={(e) => e.stopPropagation()}>
 					<div class="panel-head label-mono">
 						<span>Containers</span>
 						{#if entry.containers}
@@ -351,7 +402,7 @@
 							<span class="cstat-label">unhealthy</span>
 						</div>
 					</div>
-				</section>
+				</a>
 			{/if}
 
 			{#if topProcs.length > 0}
@@ -380,9 +431,14 @@
 
 	<!-- Alert footer -->
 	{#if (entry.host.open_alerts ?? 0) > 0}
-		<div class="alert-footer" style="background: var(--warn-soft);">
+		<a
+			class="alert-footer"
+			style="background: var(--warn-soft);"
+			href="/hosts/{entry.host.id}/events"
+			onclick={(e) => e.stopPropagation()}
+		>
 			⚠ {entry.host.open_alerts} open alert{(entry.host.open_alerts ?? 0) > 1 ? 's' : ''}
-		</div>
+		</a>
 	{/if}
 </div>
 
@@ -514,7 +570,14 @@
 		gap: 12px;
 		padding: 9px 14px 9px 16px;
 		border-bottom: 1px solid var(--line);
+		color: inherit;
+		text-decoration: none;
 	}
+	.metric-row.link {
+		cursor: pointer;
+		transition: background 100ms;
+	}
+	.metric-row.link:hover { background: var(--bg-hover, transparent); }
 
 	.metric-row:last-child { border-bottom: none; }
 
@@ -565,7 +628,14 @@
 		gap: 8px;
 		padding: 12px 14px;
 		border-bottom: 1px solid var(--line);
+		color: inherit;
+		text-decoration: none;
 	}
+	.panel.link {
+		cursor: pointer;
+		transition: background 100ms;
+	}
+	.panel.link:hover { background: var(--bg-hover, transparent); }
 
 	.panel:last-child { border-bottom: none; }
 
@@ -658,9 +728,13 @@
 	}
 
 	.alert-footer {
+		display: block;
 		padding: 8px 16px 8px 18px;
 		font-size: 12px;
 		color: var(--warn);
 		border-top: 1px solid var(--line);
+		text-decoration: none;
+		transition: filter 100ms;
 	}
+	.alert-footer:hover { filter: brightness(1.1); }
 </style>

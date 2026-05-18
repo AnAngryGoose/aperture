@@ -20,7 +20,18 @@
 
 	let { entry, onclose }: Props = $props();
 
-	let activeTab = $state<'overview' | 'containers' | 'stacks' | 'logs' | 'shell'>('overview');
+	type DrawerTab = 'overview' | 'containers' | 'stacks' | 'logs' | 'shell';
+	let activeTab = $state<DrawerTab>('overview');
+
+	// Drawer tab → full host route. Derived so it follows the current entry
+	// when the drawer is reused across host selections.
+	const TAB_HREF = $derived<Record<DrawerTab, string>>({
+		overview:   `/hosts/${entry.host.id}/overview`,
+		containers: `/hosts/${entry.host.id}/containers`,
+		stacks:     `/hosts/${entry.host.id}/stacks`,
+		logs:       `/hosts/${entry.host.id}/logs`,
+		shell:      `/hosts/${entry.host.id}/shell`
+	});
 	let containers = $state<Container[]>([]);
 	let alerts = $state<AlertEvent[]>([]);
 	let loadingContainers = $state(false);
@@ -100,19 +111,24 @@
 		<!-- Content -->
 		<div class="panel-body">
 			{#if activeTab === 'overview'}
-				<!-- Big metric grid -->
+				<!-- Big metric grid — each tile is a deep link into the matching
+				     host detail tab so a click on CPU lands on /cpu, etc. -->
 				<div class="big-metrics">
 					<BigMetric
 						label="CPU"
 						value="{(s?.cpu_percent ?? 0).toFixed(1)}%"
 						sub="{entry.host.cpu_count} cores · {entry.host.cpu_model || '—'}"
 						data={entry.cpuSeries}
+						href="/hosts/{entry.host.id}/cpu"
+						onclick={onclose}
 					/>
 					<BigMetric
 						label="Memory"
 						value="{(s?.mem_percent ?? 0).toFixed(1)}%"
 						sub="{fmtBytes(s?.mem_used ?? 0)} / {fmtBytes(entry.host.mem_total ?? 0)}"
 						data={entry.memSeries}
+						href="/hosts/{entry.host.id}/memory"
+						onclick={onclose}
 					/>
 					<BigMetric
 						label="Network ↓"
@@ -120,6 +136,8 @@
 						sub="↑ {fmtRate(entry.netOutRate)}"
 						data={entry.netInSeries}
 						color="var(--info)"
+						href="/hosts/{entry.host.id}/network"
+						onclick={onclose}
 					/>
 					{#if (s?.temps ?? []).length > 0}
 						{@const temps = s!.temps!}
@@ -131,6 +149,8 @@
 							sub="{temps.length} sensor{temps.length === 1 ? '' : 's'}"
 							data={[]}
 							color={tempColor}
+							href="/hosts/{entry.host.id}/sensors"
+							onclick={onclose}
 						/>
 					{:else}
 						<BigMetric
@@ -139,20 +159,23 @@
 							sub="no sensors"
 							data={[]}
 							color="var(--text-faint)"
+							href="/hosts/{entry.host.id}/sensors"
+							onclick={onclose}
 						/>
 					{/if}
 				</div>
 
 				<!-- Lower panels -->
 				<div class="lower-panels">
-					<div class="panel-card">
+					<a class="panel-card link" href="/hosts/{entry.host.id}/disk" onclick={onclose}>
 						<StoragePanel sample={s} />
-					</div>
-					<div class="panel-card">
-						{#if kind === 'docker'}
+					</a>
+					{#if kind === 'docker'}
+						<a class="panel-card link" href="/hosts/{entry.host.id}/containers" onclick={onclose}>
 							<ContainersPanel {containers} loading={loadingContainers} />
-						{:else if (s?.processes ?? []).length > 0}
-							<!-- Top-5 by CPU peek for bare-metal hosts -->
+						</a>
+					{:else if (s?.processes ?? []).length > 0}
+						<a class="panel-card link" href="/hosts/{entry.host.id}/processes" onclick={onclose}>
 							<div class="proc-peek">
 								<div class="label-mono">Top by CPU</div>
 								<div class="proc-list">
@@ -164,19 +187,21 @@
 									{/each}
 								</div>
 							</div>
-						{:else}
+						</a>
+					{:else}
+						<div class="panel-card">
 							<div class="text-faint" style="font-size:12px;">
 								Uptime: <span class="mono">{s?.uptime_secs ? fmtDuration(s.uptime_secs) : '—'}</span>
 							</div>
-						{/if}
-					</div>
-					<div class="panel-card">
-						<EventsPanel events={alerts} />
-					</div>
+						</div>
+					{/if}
+					<a class="panel-card link" href="/hosts/{entry.host.id}/events" onclick={onclose}>
+						<EventsPanel events={alerts} hostId={entry.host.id} />
+					</a>
 				</div>
 
 				{#if (s?.temps ?? []).length > 0}
-					<div class="sensors-mini">
+					<a class="sensors-mini link" href="/hosts/{entry.host.id}/sensors" onclick={onclose}>
 						<div class="label-mono">Sensors</div>
 						<div class="sensor-grid">
 							{#each (s?.temps ?? []) as sensor}
@@ -188,36 +213,38 @@
 								</div>
 							{/each}
 						</div>
-					</div>
+					</a>
 				{/if}
 
 				<!-- CTA into the full host monitoring page -->
 				<div class="full-cta">
-					<a href="/hosts/{entry.host.id}" class="full-link" onclick={onclose}>
+					<a href={TAB_HREF.overview} class="full-link" onclick={onclose}>
 						Open full host monitoring →
 					</a>
 				</div>
 			{:else if activeTab === 'containers'}
 				<div style="padding:16px;">
-					<a href="/hosts/{entry.host.id}/containers" class="goto-link">
+					<a href={TAB_HREF.containers} class="goto-link" onclick={onclose}>
 						Open full container management →
 					</a>
 				</div>
 			{:else if activeTab === 'stacks'}
 				<div style="padding:16px;">
-					<a href="/hosts/{entry.host.id}/compose" class="goto-link">
+					<a href={TAB_HREF.stacks} class="goto-link" onclick={onclose}>
 						Open Compose stacks →
 					</a>
 				</div>
 			{:else if activeTab === 'logs'}
 				<div style="padding:16px;">
-					<a href="/hosts/{entry.host.id}/logs" class="goto-link">
+					<a href={TAB_HREF.logs} class="goto-link" onclick={onclose}>
 						Open logs viewer →
 					</a>
 				</div>
 			{:else if activeTab === 'shell'}
-				<div style="padding:16px; color:var(--text-faint); font-size:13px;">
-					Shell sessions are available in the container detail view.
+				<div style="padding:16px;">
+					<a href={TAB_HREF.shell} class="goto-link" onclick={onclose}>
+						Open shell →
+					</a>
 				</div>
 			{/if}
 		</div>
@@ -375,6 +402,17 @@
 		border: 1px solid var(--line);
 		border-radius: var(--r-lg);
 		padding: 16px;
+		display: block;
+		color: inherit;
+		text-decoration: none;
+	}
+	.panel-card.link {
+		cursor: pointer;
+		transition: border-color 120ms, background 120ms;
+	}
+	.panel-card.link:hover {
+		border-color: var(--line-strong);
+		background: var(--bg-hover, var(--bg-elev));
 	}
 
 	.goto-link {
@@ -425,10 +463,21 @@
 	}
 
 	.sensors-mini {
+		display: block;
 		padding: 12px 16px;
 		background: var(--bg-elev);
 		border: 1px solid var(--line);
 		border-radius: var(--r-lg);
+		color: inherit;
+		text-decoration: none;
+	}
+	.sensors-mini.link {
+		cursor: pointer;
+		transition: border-color 120ms, background 120ms;
+	}
+	.sensors-mini.link:hover {
+		border-color: var(--line-strong);
+		background: var(--bg-hover, var(--bg-elev));
 	}
 
 	.sensor-grid {

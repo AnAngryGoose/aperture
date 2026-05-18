@@ -221,9 +221,9 @@
 	</header>
 
 	<nav class="subnav">
-		<a href={`/hosts/${id}`}>Overview</a>
+		<a href={`/hosts/${id}/overview`}>Overview</a>
 		<a href={`/hosts/${id}/containers`}>Containers</a>
-		<a href={`/hosts/${id}/compose`}>Compose</a>
+		<a href={`/hosts/${id}/stacks`}>Stacks</a>
 		<a href={`/hosts/${id}/networks`}>Networks</a>
 		<a href={`/hosts/${id}/logs`} class="active">Logs</a>
 		<a href={`/hosts/${id}/volumes`}>Volumes</a>

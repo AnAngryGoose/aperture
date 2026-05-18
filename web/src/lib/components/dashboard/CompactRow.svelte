@@ -39,22 +39,22 @@
 	<span class="addr mono">{entry.host.platform || entry.host.os || '—'}</span>
 
 	<!-- CPU -->
-	<div class="metric-cell">
+	<a class="metric-cell" href="/hosts/{entry.host.id}/cpu" onclick={(e) => e.stopPropagation()}>
 		<Sparkline data={entry.cpuSeries} width={80} height={20} color="var(--accent)" />
 		<span class="pct mono">{(s?.cpu_percent ?? 0).toFixed(0)}%</span>
-	</div>
+	</a>
 
 	<!-- MEM -->
-	<div class="metric-cell">
+	<a class="metric-cell" href="/hosts/{entry.host.id}/memory" onclick={(e) => e.stopPropagation()}>
 		<Sparkline data={entry.memSeries} width={80} height={20} color="var(--accent)" />
 		<span class="pct mono">{(s?.mem_percent ?? 0).toFixed(0)}%</span>
-	</div>
+	</a>
 
 	<!-- NET -->
-	<div class="metric-cell">
+	<a class="metric-cell" href="/hosts/{entry.host.id}/network" onclick={(e) => e.stopPropagation()}>
 		<Sparkline data={entry.netInSeries} width={80} height={20} color="var(--info)" />
 		<span class="pct mono">{fmtRate(entry.netInRate)}</span>
-	</div>
+	</a>
 
 	<!-- Uptime -->
 	<span class="uptime mono">{s?.uptime_secs ? fmtDuration(s.uptime_secs) : '—'}</span>
@@ -120,7 +120,14 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
+		text-decoration: none;
+		color: inherit;
+		padding: 2px 4px;
+		margin: -2px -4px;
+		border-radius: var(--r-sm);
+		transition: background 100ms;
 	}
+	.metric-cell:hover { background: var(--bg-hover, transparent); }
 
 	.pct {
 		font-size: 12px;
