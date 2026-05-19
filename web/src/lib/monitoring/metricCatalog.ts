@@ -21,7 +21,7 @@ export interface MetricSpec {
 	unit: string;         // "%" | "bytes/s" | "°C" | "GiB" | "" (count)
 	/** How the value is rendered on cards/sparkline tooltips. */
 	format?: (v: number) => string;
-	/** Default sparkline color in the v0.4 token system. */
+	/** Default sparkline color from the design token system. */
 	color: string;
 	/** Resolve the metric value from a MetricSample for card display. */
 	resolve: (s: MetricSample) => number;

@@ -30,9 +30,9 @@
 	let plot: uPlot | null = null;
 
 	// uPlot writes directly to canvas, so it can't read CSS variables. We
-	// resolve the v0.4 tokens once at construction time. On theme switch the
+	// resolve the design tokens once at construction time. On theme switch the
 	// chart is currently not rebuilt; the colors will look stale until the
-	// next mount. Acceptable today because the v0.4 host detail page rebuilds
+	// next mount. Acceptable today because the host detail page rebuilds
 	// charts on range changes, which the user does frequently.
 	function resolveToken(name: string, fallback: string): string {
 		if (typeof window === 'undefined') return fallback;
@@ -66,8 +66,8 @@
 	function buildOpts(w: number): uPlot.Options {
 		// Capture strokes at build-time so hook closures stay consistent.
 		const ss = series.map((s, i) => s.stroke ?? palette[i % palette.length]);
-		// Resolve v0.4 design tokens for canvas-side rendering. Fallbacks
-		// preserve the prior pre-v0.4 look if anything goes wrong.
+		// Resolve design tokens for canvas-side rendering. Fallbacks preserve
+		// a sensible default if anything goes wrong.
 		const axisStroke = resolveToken('--text-faint', '#6b7494');
 		const gridStroke = resolveToken('--line', '#1c253a');
 

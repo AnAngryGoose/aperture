@@ -5,9 +5,19 @@
 	import type { AgentToken } from '$lib/types';
 	import { toast } from '$lib/toast';
 	import { absTime, relTime } from '$lib/format';
-	import { theme } from '$lib/stores/theme.svelte';
+	import { theme, type ThemeMode } from '$lib/stores/theme.svelte';
 	import { accent, ACCENTS, type AccentKey } from '$lib/stores/accent.svelte';
+
+	const THEME_OPTIONS: ReadonlyArray<{ key: ThemeMode; label: string }> = [
+		{ key: 'dark',          label: 'Dark' },
+		{ key: 'light',         label: 'Light' },
+		{ key: 'gruvbox-dark',  label: 'Gruvbox dark' },
+		{ key: 'gruvbox-light', label: 'Gruvbox light' },
+		{ key: 'system',        label: 'System' }
+	];
 	import type { HostConfig } from '$lib/types';
+	import Button from '$lib/components/primitives/Button.svelte';
+	import ConfirmDialog from '$lib/components/primitives/ConfirmDialog.svelte';
 
 	// ── password change ───────────────────────────────────────────────────────
 	let pwCurrent  = $state('');
@@ -33,10 +43,6 @@
 		}
 	}
 
-	async function logout() {
-		await api.auth.logout().catch(() => {});
-		await goto('/login');
-	}
 
 	let tokens = $state<AgentToken[]>([]);
 	let loading = $state(true);
@@ -109,15 +115,32 @@
 		setTimeout(() => (copied = false), 2000);
 	}
 
-	async function revoke(t: AgentToken) {
-		if (!confirm(`Revoke token "${t.name}"? Any agent using it will disconnect.`)) return;
+	let revokeTarget = $state<AgentToken | null>(null);
+	let revokeBusy = $state(false);
+
+	async function doRevoke() {
+		if (!revokeTarget) return;
+		revokeBusy = true;
 		try {
-			await api.revokeAgentToken(t.id);
-			tokens = tokens.filter(tk => tk.id !== t.id);
-			toast.success(`Token "${t.name}" revoked`);
+			await api.revokeAgentToken(revokeTarget.id);
+			tokens = tokens.filter(tk => tk.id !== revokeTarget!.id);
+			toast.success(`Token "${revokeTarget.name}" revoked`);
+			revokeTarget = null;
 		} catch (e) {
 			toast.error((e as Error).message);
+		} finally {
+			revokeBusy = false;
 		}
+	}
+
+	let signOutOpen = $state(false);
+	let signOutBusy = $state(false);
+	async function doSignOut() {
+		signOutBusy = true;
+		await api.auth.logout().catch(() => {});
+		signOutOpen = false;
+		signOutBusy = false;
+		await goto('/login');
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -187,12 +210,12 @@
 	<div class="appear-row">
 		<span class="appear-label">Theme</span>
 		<div class="theme-btns">
-			{#each (['dark', 'light', 'system'] as const) as t}
+			{#each THEME_OPTIONS as t}
 				<button
 					class="theme-btn"
-					class:active={theme.mode === t}
-					onclick={() => theme.set(t)}
-				>{t.charAt(0).toUpperCase() + t.slice(1)}</button>
+					class:active={theme.mode === t.key}
+					onclick={() => theme.set(t.key)}
+				>{t.label}</button>
 			{/each}
 		</div>
 	</div>
@@ -273,9 +296,9 @@
 		<div class="defaults-bar">
 			{#if defaultsSaved}<span class="ok-msg">saved ✓</span>{/if}
 			{#if defaultsError}<span class="err-msg">{defaultsError}</span>{/if}
-			<button class="save-btn" onclick={saveDefaults} disabled={defaultsSaving}>
+			<Button variant="primary" onclick={saveDefaults} loading={defaultsSaving}>
 				{defaultsSaving ? 'Saving…' : 'Save defaults'}
-			</button>
+			</Button>
 		</div>
 	</div>
 {/if}
@@ -286,7 +309,7 @@
 		<div class="section-title">Agent tokens</div>
 		<div class="section-sub muted">Tokens authorise remote <code>aperture-agent</code> instances to connect to this hub.</div>
 	</div>
-	<button onclick={openWizard}>+ Add agent</button>
+	<Button variant="primary" onclick={openWizard}>+ Add Agent</Button>
 </div>
 
 {#if error}
@@ -299,8 +322,8 @@
 	<div class="card empty">
 		<div class="empty-icon">⬡</div>
 		<div class="empty-title">No agent tokens yet</div>
-		<div class="empty-sub muted">Click <strong>+ Add agent</strong> to generate a token and get the connection command for a remote host.</div>
-		<button onclick={openWizard} style="margin-top:12px">+ Add agent</button>
+		<div class="empty-sub muted">Click <strong>+ Add Agent</strong> to generate a token and get the connection command for a remote host.</div>
+		<div style="margin-top:12px"><Button variant="primary" onclick={openWizard}>+ Add Agent</Button></div>
 	</div>
 {:else}
 	<div class="card no-pad">
@@ -326,7 +349,7 @@
 							{/if}
 						</td>
 						<td class="actions">
-							<button class="danger" onclick={() => revoke(t)}>Revoke</button>
+							<Button variant="danger" size="sm" onclick={() => (revokeTarget = t)}>Revoke</Button>
 						</td>
 					</tr>
 				{/each}
@@ -446,11 +469,41 @@
 		</div>
 		{#if pwError}<p class="pw-hint" style="margin-top:6px">{pwError}</p>{/if}
 		<div class="pw-actions" style="margin-top:16px">
-			<button type="submit" disabled={!pwCanSave}>{pwSaving ? 'Saving…' : 'Change password'}</button>
-			<button type="button" class="btn-logout" onclick={logout}>Sign out</button>
+			<Button variant="primary" type="submit" disabled={!pwCanSave} loading={pwSaving}>
+				{pwSaving ? 'Saving…' : 'Change password'}
+			</Button>
+			<Button variant="ghost" type="button" onclick={() => (signOutOpen = true)}>Sign out</Button>
 		</div>
 	</form>
 </div>
+
+<ConfirmDialog
+	open={revokeTarget !== null}
+	tone="danger"
+	title="Revoke agent token"
+	message="Revoke this token and disconnect any agent using it?"
+	detail={revokeTarget?.name ?? ''}
+	consequences={[
+		'Any agent currently connected with this token will be kicked off immediately.',
+		'You will need to issue a new token to reconnect the agent.'
+	]}
+	confirmLabel="Revoke token"
+	busy={revokeBusy}
+	onconfirm={doRevoke}
+	oncancel={() => (revokeTarget = null)}
+/>
+
+<ConfirmDialog
+	open={signOutOpen}
+	tone="warning"
+	title="Sign out"
+	message="Sign out of Aperture on this browser?"
+	consequences={['You will need to sign back in to access the hub.']}
+	confirmLabel="Sign out"
+	busy={signOutBusy}
+	onconfirm={doSignOut}
+	oncancel={() => (signOutOpen = false)}
+/>
 
 <style>
 	.page-header { margin-bottom: 20px; }
@@ -621,16 +674,6 @@
 	.pw-row input.bad   { border-color: var(--bad); }
 	.pw-hint { font-size: 12px; color: var(--bad); }
 	.pw-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-	.btn-logout {
-		background: transparent;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		color: var(--text-dim);
-		font-size: 13px;
-		padding: 7px 14px;
-		cursor: pointer;
-	}
-	.btn-logout:hover { border-color: var(--bad); color: var(--bad); }
 
 	/* Appearance */
 	.appear-card {
@@ -661,6 +704,7 @@
 	.theme-btns {
 		display: flex;
 		gap: 4px;
+		flex-wrap: wrap;
 	}
 
 	.theme-btn {
@@ -778,17 +822,6 @@
 		justify-content: flex-end;
 		gap: 12px;
 	}
-	.save-btn {
-		padding: 7px 14px;
-		font-size: 12px;
-		color: #fff;
-		background: var(--accent);
-		border: 1px solid var(--accent);
-		border-radius: var(--r-md);
-		cursor: pointer;
-	}
-	.save-btn:hover { filter: brightness(1.05); }
-	.save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 	.ok-msg { color: var(--ok); font-size: 11px; font-family: var(--font-mono); }
 	.err-msg { color: var(--crit); font-size: 11px; }
 </style>

@@ -2,7 +2,7 @@
 
 A self-hosted homelab command center. One UI for system metrics, container management, and alerts across local + remote hosts. Designed to replace Beszel, Portainer/Dockge, and Dozzle with a single tool.
 
-**Current version: v0.4.1-alpha.1**
+**Current version: v0.0.4-alpha.3**
 
 ---
 
@@ -41,7 +41,7 @@ A self-hosted homelab command center. One UI for system metrics, container manag
 - **Templates** — apply "Beszel defaults" / "Aggressive" / "Quiet" preset rule sets per-host or globally.
 - **Notifications** through 17+ services via Shoutrrr (Discord, Slack, Telegram, Matrix, Pushover, Teams, ntfy, Gotify, Mattermost, Rocketchat, etc.) plus a generic webhook.
 
-**UI (v0.4)**
+**UI**
 - Sidebar shell, Geist font, dark/light/system theme, six accent colors.
 - Dashboard with rich/tile/list card variants + a per-card widget picker (pick 2–4 metrics per host).
 - Host detail with 10 tabs: Overview / CPU / Memory / Disk / Network / Sensors / Processes / Docker / Events / Settings.
@@ -303,7 +303,7 @@ All endpoints are under `/api`. Auth required via `aperture_session` cookie exce
 | POST | `/api/auth/logout` | Clears the session. |
 | POST | `/api/auth/change-password` | `{current, new}` |
 
-### Monitoring (v0.4.1 spine)
+### Monitoring spine
 
 | Method | Path | Notes |
 |---|---|---|
@@ -415,7 +415,7 @@ web/src/
 
 **Agent stays offline after connect.** Check `curl http://hub-ip:8080/api/health` from the agent machine. If using a hostname, verify DNS resolution.
 
-**Host detail page making thousands of requests.** This was a v0.4.1 regression that's been fixed — if you somehow still see it, you're running an unfixed build of `hosts/[id]/+page.svelte`. Rebuild from current source.
+**Host detail page making thousands of requests.** This was an early regression that's been fixed — if you somehow still see it, you're running an unfixed build of `hosts/[id]/+page.svelte`. Rebuild from current source.
 
 **High CPU on agent machine.** Either lower its sample interval (UI → host → Settings → Sample interval) or disable expensive families (processes, cpu_per_core).
 
@@ -425,7 +425,7 @@ web/src/
 
 ## Roadmap
 
-Phase 4 (monitoring depth + Beszel parity + remote-host expansion) is **done** with v0.4.1. Planned next:
+Phase 4 (monitoring depth + Beszel parity + remote-host expansion) is **done**. Planned next:
 
 | Phase | Focus |
 |---|---|

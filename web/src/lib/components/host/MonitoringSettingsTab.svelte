@@ -2,6 +2,7 @@
 	import type { MonitoringBundle, HostConfig, MonitoringCatalog } from '$lib/types';
 	import { api } from '$lib/api';
 	import { onMount } from 'svelte';
+	import Button from '$lib/components/primitives/Button.svelte';
 
 	interface Props {
 		bundle: MonitoringBundle;
@@ -13,7 +14,12 @@
 	// Snapshot the bundle's config into local mutable state. Form bindings
 	// edit this copy; Save calls PUT /api/hosts/{id}/config which persists
 	// + pushes to the running collector/agent.
-	let cfg = $state<HostConfig>(structuredClone(bundle.config));
+	//
+	// `bundle.config` arrives wrapped in Svelte 5's reactive Proxy because the
+	// parent page declared it via $state. Passing a Proxy to structuredClone
+	// throws DataCloneError, so we use $state.snapshot to deep-copy the plain
+	// underlying data first.
+	let cfg = $state<HostConfig>(structuredClone($state.snapshot(bundle.config)) as HostConfig);
 	let saving = $state(false);
 	let saveError = $state<string | null>(null);
 	let saveOk = $state(false);
@@ -57,7 +63,7 @@
 	}
 
 	function reset() {
-		cfg = structuredClone(bundle.config);
+		cfg = structuredClone($state.snapshot(bundle.config)) as HostConfig;
 		saveOk = false;
 		saveError = null;
 	}
@@ -196,10 +202,10 @@
 	<div class="bar">
 		{#if saveOk}<span class="ok mono">saved ✓</span>{/if}
 		{#if saveError}<span class="err">{saveError}</span>{/if}
-		<button class="btn ghost" onclick={reset} disabled={saving}>Reset</button>
-		<button class="btn primary" onclick={save} disabled={saving}>
-			{saving ? 'Saving…' : 'Save changes'}
-		</button>
+		<Button variant="ghost" onclick={reset} disabled={saving}>Reset</Button>
+		<Button variant="primary" onclick={save} loading={saving}>
+			{saving ? 'Saving…' : 'Save defaults'}
+		</Button>
 	</div>
 </div>
 
@@ -333,26 +339,6 @@
 		gap: 10px;
 		padding: 8px 0;
 	}
-
-	.btn {
-		padding: 7px 14px;
-		font-size: 12px;
-		border-radius: var(--r-md);
-		cursor: pointer;
-		font-family: var(--font-sans);
-		transition: background 120ms;
-	}
-
-	.btn.ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--line); }
-	.btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
-
-	.btn.primary {
-		background: var(--accent);
-		color: #fff;
-		border: 1px solid var(--accent);
-	}
-	.btn.primary:hover { filter: brightness(1.05); }
-	.btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 	.ok { color: var(--ok); font-size: 11px; font-family: var(--font-mono); }
 	.err { color: var(--crit); font-size: 11px; }

@@ -1,7 +1,7 @@
 // Route param matcher: constrains [tab] inside /hosts/[id]/[tab=hostTab] to
-// the monitoring tabs that the single-page host detail handles. Dedicated
-// routes (containers, stacks, networks, volumes, images, logs, shell) sit at
-// literal segments and take precedence over this matcher.
+// the host detail tabs. Dedicated routes that need their own +page.svelte
+// (containers, stacks, networks, volumes, images, logs, shell) live at
+// literal segments which take precedence over this matcher.
 
 export type HostTab =
 	| 'overview'

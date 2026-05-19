@@ -3,9 +3,10 @@
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
 	import type { Container } from '$lib/types';
+	import Button from '$lib/components/primitives/Button.svelte';
+	import Icon from '$lib/components/primitives/Icon.svelte';
 
-	let id = $derived(page.params.id);
-	let hostName = $state('');
+	let id = $derived(page.params.id ?? '');
 	let allContainers = $state<Container[]>([]);
 	let selectedIDs = $state<string[]>([]);
 	let tail = $state(200);
@@ -17,7 +18,6 @@
 	let polling = $state<ReturnType<typeof setInterval> | null>(null);
 	let logEl: HTMLElement | undefined;
 
-	// Track the latest log timestamp seen per container (ms precision for dedup).
 	const lastSeenMs = new Map<string, number>();
 
 	const COLORS = [
@@ -43,12 +43,9 @@
 	}
 
 	function stripAnsi(s: string): string {
-		// Remove CSI sequences and a few common escape codes
 		return s.replace(/\x1b\[[0-9;]*[mGKHFJABCDsu]/g, '').replace(/\x1b[()][0-9A-Z]/g, '');
 	}
 
-	// Docker log lines with timestamps look like:
-	//   2024-01-15T14:30:01.123456789Z rest of line
 	function parseLine(raw: string): { tsMs: number; tsStr: string; text: string } {
 		const m = raw.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s(.*)$/s);
 		if (m) {
@@ -75,8 +72,6 @@
 				raw = await api.containerLogs(id, cid, { tail, timestamps: true });
 			} else {
 				if (!prevMs) return;
-				// Fetch from 1 second before last seen to avoid missing sub-second logs;
-				// dedup client-side by tsMs.
 				const sinceUnix = Math.max(0, Math.floor(prevMs / 1000) - 1);
 				raw = await api.containerLogs(id, cid, { since: sinceUnix, timestamps: true });
 			}
@@ -91,7 +86,6 @@
 			const trimmed = rawLine.trimEnd();
 			if (!trimmed) continue;
 			const { tsMs, tsStr, text } = parseLine(trimmed);
-			// Skip lines we've already displayed.
 			if (tsMs > 0 && tsMs <= prevMs) continue;
 			newLines.push({
 				key: `${cid}-${lineSeq++}`,
@@ -187,7 +181,6 @@
 			: lines
 	);
 
-	// Detect manual scroll-up to pause follow.
 	function onScroll() {
 		if (!logEl) return;
 		const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 60;
@@ -196,13 +189,8 @@
 
 	onMount(async () => {
 		try {
-			const host = await api.host(id);
-			hostName = host.name;
-		} catch {}
-		try {
 			const cs = await api.containers(id, true);
 			allContainers = cs;
-			// Default: first running container.
 			const first = cs.find((c) => c.state === 'running') ?? cs[0];
 			if (first) selectedIDs = [first.id];
 		} catch {}
@@ -212,28 +200,20 @@
 	onDestroy(stopPolling);
 </script>
 
-<svelte:head><title>Aperture — {hostName || id} — Logs</title></svelte:head>
-
-<div class="page">
-	<header class="page-header">
-		<h1>Logs</h1>
-		{#if hostName}<span class="host-name">{hostName}</span>{/if}
+<section class="logs-tab">
+	<header class="tab-head">
+		<div class="lead">
+			<h2>Logs</h2>
+			<span class="lead-sub mono">
+				{filteredLines.length}{searchText.trim() ? ` / ${lines.length}` : ''} line{filteredLines.length === 1 ? '' : 's'}
+				{#if polling} · live (2s){/if}
+			</span>
+		</div>
 	</header>
 
-	<nav class="subnav">
-		<a href={`/hosts/${id}/overview`}>Overview</a>
-		<a href={`/hosts/${id}/containers`}>Containers</a>
-		<a href={`/hosts/${id}/stacks`}>Stacks</a>
-		<a href={`/hosts/${id}/networks`}>Networks</a>
-		<a href={`/hosts/${id}/logs`} class="active">Logs</a>
-		<a href={`/hosts/${id}/volumes`}>Volumes</a>
-		<a href={`/hosts/${id}/images`}>Images</a>
-	</nav>
-
-	<!-- Toolbar -->
-	<div class="toolbar card">
+	<div class="toolbar">
 		<div class="row">
-			<span class="label">Containers</span>
+			<span class="label-mono">Containers</span>
 			<div class="picker">
 				{#each allContainers as c (c.id)}
 					<button
@@ -242,30 +222,27 @@
 						onclick={() => toggleContainer(c.id)}
 						title={c.image}
 					>
-						<span
-							class="state-dot"
-							style="background:{c.state === 'running' ? '#2ecc71' : '#888'}"
-						></span>
+						<span class="state-dot" class:running={c.state === 'running'}></span>
 						{c.name.replace(/^\//, '')}
 					</button>
 				{/each}
 				{#if allContainers.length === 0}
-					<span class="dim">No containers found</span>
+					<span class="muted">No containers found</span>
 				{/if}
 			</div>
-			<button class="btn-sm" onclick={loadAll} disabled={selectedIDs.length === 0 || loading}>
+			<Button variant="ghost" size="sm" onclick={loadAll} disabled={selectedIDs.length === 0 || loading}>
 				{loading ? 'Loading…' : 'Reload'}
-			</button>
+			</Button>
 		</div>
 
 		<div class="row opts-row">
 			<label class="opt">
-				<span>Tail</span>
+				<span class="label-mono">Tail</span>
 				<select bind:value={tail}>
 					<option value={50}>50</option>
 					<option value={200}>200</option>
 					<option value={500}>500</option>
-					<option value={1000}>1 000</option>
+					<option value={1000}>1000</option>
 				</select>
 			</label>
 
@@ -282,21 +259,20 @@
 			<div class="flex-spacer"></div>
 
 			<input class="search" type="search" placeholder="Filter lines…" bind:value={searchText} />
-			<button class="btn-sm" onclick={clearDisplay} title="Clear display">Clear</button>
-			<button class="btn-sm" onclick={exportLogs} disabled={lines.length === 0} title="Export as text">
+			<Button variant="ghost" size="sm" onclick={clearDisplay} title="Clear display">Clear</Button>
+			<Button variant="ghost" size="sm" onclick={exportLogs} disabled={lines.length === 0} title="Export as text">
 				Export
-			</button>
+			</Button>
 		</div>
 	</div>
 
-	<!-- Log pane -->
 	<div class="log-wrap" bind:this={logEl} onscroll={onScroll}>
 		{#if loading}
 			<div class="empty">Loading…</div>
 		{:else if selectedIDs.length === 0}
 			<div class="empty">Select one or more containers above to view logs.</div>
 		{:else if filteredLines.length === 0 && lines.length > 0}
-			<div class="empty">No lines match "<em>{searchText}</em>"</div>
+			<div class="empty">No lines match "{searchText}"</div>
 		{:else if filteredLines.length === 0}
 			<div class="empty">No log output yet.</div>
 		{:else}
@@ -314,160 +290,115 @@
 		{/if}
 	</div>
 
-	<!-- Status bar -->
-	<div class="statusbar">
-		<span class="live-dot" class:active={polling !== null}></span>
-		<span>
-			{filteredLines.length}{searchText.trim() ? ` / ${lines.length}` : ''} lines
-		</span>
-		{#if polling}
-			<span class="dim">· live (2s)</span>
-		{/if}
-		{#if selectedIDs.length > 1}
-			<span class="dim">· {selectedIDs.length} containers</span>
-		{/if}
-		{#if !follow && lines.length > 0}
-			<button class="btn-jump" onclick={() => { follow = true; scheduleScroll(); }}>
-				↓ Jump to bottom
-			</button>
-		{/if}
-	</div>
-</div>
+	{#if !follow && lines.length > 0}
+		<div class="jump-row">
+			<Button variant="ghost" size="sm" onclick={() => { follow = true; scheduleScroll(); }}>
+				<Icon name="arrow-down" size={12} /> Jump to bottom
+			</Button>
+		</div>
+	{/if}
+</section>
 
 <style>
-	.page {
+	.logs-tab {
 		display: flex;
 		flex-direction: column;
-		height: calc(100vh - 60px);
-		padding: 0.75rem 1rem;
-		gap: 0.5rem;
-		box-sizing: border-box;
-		overflow: hidden;
+		gap: 10px;
+		min-height: calc(100vh - 220px);
 	}
 
-	.page-header {
+	.tab-head {
 		display: flex;
-		align-items: baseline;
-		gap: 0.75rem;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
 	}
-	h1 { margin: 0; font-size: 1.3rem; }
-	.host-name { font-size: 0.9rem; color: var(--text-dim); }
+	.lead { display: flex; align-items: baseline; gap: 10px; }
+	.lead h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
+	.lead-sub { font-size: 11px; color: var(--text-faint); }
 
-	/* Sub-nav */
-	.subnav {
-		display: flex;
-		gap: 0;
-		border-bottom: 1px solid var(--border);
-		flex-wrap: wrap;
-		flex-shrink: 0;
-	}
-	.subnav a {
-		padding: 0.3rem 0.75rem;
-		color: var(--text-dim);
-		text-decoration: none;
-		font-size: 0.85rem;
-		border-bottom: 2px solid transparent;
-		margin-bottom: -1px;
-	}
-	.subnav a:hover { color: var(--text); }
-	.subnav a.active { color: var(--accent); border-bottom-color: var(--accent); }
-
-	/* Toolbar */
 	.toolbar {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
-		padding: 0.6rem 0.9rem;
-		flex-shrink: 0;
+		gap: 8px;
+		padding: 10px 12px;
+		background: var(--bg-elev);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
 	}
-	.row {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-		flex-wrap: wrap;
+	.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+	.opts-row { gap: 14px; }
+
+	.label-mono {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-faint);
+		white-space: nowrap;
 	}
-	.opts-row { gap: 0.75rem; }
-	.label { font-size: 0.8rem; color: var(--text-dim); white-space: nowrap; }
-	.picker { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+
+	.picker { display: flex; gap: 4px; flex-wrap: wrap; }
 
 	.pick-btn {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.3rem;
-		padding: 0.2rem 0.6rem;
-		border-radius: 999px;
-		border: 1px solid var(--border);
-		background: transparent;
+		gap: 6px;
+		padding: 3px 10px;
+		border-radius: var(--r-pill);
+		border: 1px solid var(--line);
+		background: var(--bg-elev-2);
 		color: var(--text-dim);
-		font-size: 0.78rem;
+		font-size: 11px;
+		font-family: var(--font-sans);
 		cursor: pointer;
+		transition: background 120ms, color 120ms, border-color 120ms;
 	}
-	.pick-btn:hover { border-color: var(--accent); color: var(--text); }
+	.pick-btn:hover { border-color: var(--line-strong); color: var(--text); }
 	.pick-btn.selected {
 		border-color: var(--accent);
-		color: var(--text);
-		background: color-mix(in srgb, var(--accent) 14%, transparent);
+		color: var(--accent);
+		background: var(--accent-soft);
 	}
-	.state-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+	.state-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--offline); flex-shrink: 0; }
+	.state-dot.running { background: var(--ok); }
 
 	.opt {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		font-size: 0.82rem;
-		color: var(--text-dim);
-		cursor: pointer;
-		user-select: none;
-		white-space: nowrap;
+		display: flex; align-items: center; gap: 6px;
+		font-size: 12px; color: var(--text-dim);
+		cursor: pointer; user-select: none; white-space: nowrap;
 	}
 	.opt select {
-		background: var(--bg-card);
-		border: 1px solid var(--border);
-		color: var(--text);
-		border-radius: 4px;
-		padding: 0.15rem 0.4rem;
-		font-size: 0.8rem;
+		background: var(--bg-elev-2);
+		border: 1px solid var(--line);
+		color: var(--text); border-radius: var(--r-md);
+		padding: 3px 8px; font-size: 11px;
 	}
 	.opt input[type='checkbox'] { accent-color: var(--accent); }
-	.opt.toggle { cursor: pointer; }
 
 	.flex-spacer { flex: 1; }
 
 	.search {
 		width: 200px;
-		background: var(--bg-card);
-		border: 1px solid var(--border);
-		border-radius: 4px;
-		padding: 0.25rem 0.5rem;
+		background: var(--bg-elev-2);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
+		padding: 4px 10px;
 		color: var(--text);
-		font-size: 0.82rem;
+		font-size: 12px;
 	}
-	.search:focus { outline: none; border-color: var(--accent); }
+	.search:focus { outline: none; border-color: var(--accent-line); }
 
-	.btn-sm {
-		padding: 0.25rem 0.7rem;
-		border-radius: 4px;
-		border: 1px solid var(--border);
-		background: transparent;
-		color: var(--text-dim);
-		font-size: 0.8rem;
-		cursor: pointer;
-		white-space: nowrap;
-	}
-	.btn-sm:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
-	.btn-sm:disabled { opacity: 0.4; cursor: default; }
-
-	/* Log pane */
 	.log-wrap {
 		flex: 1;
-		min-height: 0;
+		min-height: 320px;
 		overflow-y: auto;
-		background: #0d0d0d;
-		border-radius: 6px;
-		border: 1px solid var(--border);
-		padding: 0.4rem 0.6rem;
-		font-family: 'Fira Code', 'Cascadia Code', Consolas, 'Courier New', monospace;
-		font-size: 0.78rem;
+		background: var(--bg);
+		border-radius: var(--r-md);
+		border: 1px solid var(--line);
+		padding: 8px 12px;
+		font-family: var(--font-mono);
+		font-size: 11px;
 		line-height: 1.55;
 	}
 
@@ -475,24 +406,25 @@
 		display: block;
 		white-space: pre-wrap;
 		word-break: break-all;
-		padding: 0.05rem 0;
+		padding: 1px 0;
+		color: var(--text);
 	}
-	.log-line:hover { background: rgba(255, 255, 255, 0.04); }
+	.log-line:hover { background: var(--bg-hover); }
 
 	.ctag {
 		font-weight: 600;
 		margin-right: 0.5em;
 		min-width: 10ch;
 		display: inline-block;
-		font-size: 0.74rem;
+		font-size: 10px;
 	}
 	.ts {
-		color: #555;
+		color: var(--text-faint);
 		margin-right: 0.6em;
-		font-size: 0.73rem;
+		font-size: 10px;
 		white-space: nowrap;
 	}
-	.msg { color: #d4d4d4; }
+	.msg { color: var(--text); }
 
 	.empty {
 		display: flex;
@@ -500,39 +432,11 @@
 		justify-content: center;
 		height: 100%;
 		min-height: 80px;
-		color: var(--text-dim);
-		font-size: 0.9rem;
+		color: var(--text-faint);
+		font-size: 12px;
 	}
 
-	/* Status bar */
-	.statusbar {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-		font-size: 0.78rem;
-		color: var(--text-dim);
-		flex-shrink: 0;
-		padding: 0.1rem 0;
-	}
-	.live-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: var(--border);
-		transition: background 0.3s;
-		flex-shrink: 0;
-	}
-	.live-dot.active { background: #2ecc71; box-shadow: 0 0 5px #2ecc71; }
-	.dim { opacity: 0.55; }
-	.btn-jump {
-		margin-left: auto;
-		padding: 0.15rem 0.6rem;
-		border-radius: 4px;
-		border: 1px solid var(--border);
-		background: var(--bg-card);
-		color: var(--accent);
-		font-size: 0.78rem;
-		cursor: pointer;
-	}
-	.btn-jump:hover { border-color: var(--accent); }
+	.muted { color: var(--text-faint); font-size: 12px; }
+
+	.jump-row { display: flex; justify-content: flex-end; }
 </style>

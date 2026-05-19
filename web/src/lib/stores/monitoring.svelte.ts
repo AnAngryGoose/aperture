@@ -124,7 +124,7 @@ function createMonitoringStore() {
 			// Stamp the legacy `host.open_alerts` field too. Six readers across
 			// the dashboard (Sidebar badge, FilterBar visibility, HostGrid
 			// "alerts" filter, RichCard footer, TileCard pill, /hosts page)
-			// still read this field; the v0.4.1 overview endpoint doesn't
+			// still read this field; the current overview endpoint doesn't
 			// populate it on the Host row, so without this stamp they all
 			// silently see 0. Cheap to mirror — keeps the new and legacy fields
 			// in lockstep without a 6-file refactor.

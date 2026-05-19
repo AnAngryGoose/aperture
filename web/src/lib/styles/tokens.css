@@ -31,6 +31,33 @@
   --text-faint: #8a8f97;
 }
 
+/* Gruvbox dark — Pavel Pertsev's "retro groove" palette. Background uses the
+ * standard `bg0`/`bg1`/`bg2` ladder; foreground uses `fg1`/`fg3`/`fg4`. */
+[data-theme="gruvbox-dark"] {
+  --bg: #282828;
+  --bg-elev: #32302f;
+  --bg-elev-2: #3c3836;
+  --bg-hover: #45403d;
+  --line: #504945;
+  --line-strong: #665c54;
+  --text: #ebdbb2;
+  --text-dim: #d5c4a1;
+  --text-faint: #a89984;
+}
+
+/* Gruvbox light — same hue ladder mirrored against the bright `bg0`. */
+[data-theme="gruvbox-light"] {
+  --bg: #fbf1c7;
+  --bg-elev: #f9f5d7;
+  --bg-elev-2: #ebdbb2;
+  --bg-hover: #f2e5bc;
+  --line: #d5c4a1;
+  --line-strong: #bdae93;
+  --text: #3c3836;
+  --text-dim: #504945;
+  --text-faint: #7c6f64;
+}
+
 /* Accent — default teal; overridden by accent store */
 :root {
   --accent: #14b8a6;
@@ -38,7 +65,7 @@
   --accent-line: rgba(20, 184, 166, 0.4);
 }
 
-/* Status — theme-invariant */
+/* Status — theme-invariant defaults */
 :root {
   --ok: #34d399;
   --ok-soft: rgba(52, 211, 153, 0.14);
@@ -48,6 +75,31 @@
   --crit-soft: rgba(239, 68, 68, 0.14);
   --info: #60a5fa;
   --offline: #6b7280;
+}
+
+/* Status — gruvbox neon family (bright variants from the palette) */
+[data-theme="gruvbox-dark"] {
+  --ok:   #b8bb26;
+  --ok-soft:   rgba(184, 187, 38, 0.16);
+  --warn: #fabd2f;
+  --warn-soft: rgba(250, 189, 47, 0.18);
+  --crit: #fb4934;
+  --crit-soft: rgba(251, 73, 52, 0.18);
+  --info: #83a598;
+  --offline: #928374;
+}
+
+/* Status — gruvbox light uses the darker `faded` variants for contrast on
+ * the bright `bg0`. */
+[data-theme="gruvbox-light"] {
+  --ok:   #79740e;
+  --ok-soft:   rgba(121, 116, 14, 0.16);
+  --warn: #b57614;
+  --warn-soft: rgba(181, 118, 20, 0.16);
+  --crit: #9d0006;
+  --crit-soft: rgba(157, 0, 6, 0.14);
+  --info: #076678;
+  --offline: #7c6f64;
 }
 
 /* Typography */

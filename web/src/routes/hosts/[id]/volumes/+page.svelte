@@ -4,9 +4,12 @@
 	import { api } from '$lib/api';
 	import type { DockerVolume, VolumeCreateSpec } from '$lib/types';
 	import { formatBytes, relTime, absTime } from '$lib/format';
+	import Button from '$lib/components/primitives/Button.svelte';
+	import Modal from '$lib/components/primitives/Modal.svelte';
+	import ConfirmDialog from '$lib/components/primitives/ConfirmDialog.svelte';
+	import Icon from '$lib/components/primitives/Icon.svelte';
 
-	let id = $derived(page.params.id);
-	let hostName = $state('');
+	let id = $derived(page.params.id ?? '');
 	let volumes = $state<DockerVolume[]>([]);
 	let error = $state<string | null>(null);
 	let busy = $state<Record<string, boolean>>({});
@@ -27,11 +30,16 @@
 		labels: {}
 	});
 	let form = $state(blankForm());
-	
+
 	let optKey = $state('');
 	let optVal = $state('');
 	let labelKey = $state('');
 	let labelVal = $state('');
+
+	// Confirmation
+	type Pending = { vol: DockerVolume; force: boolean } | null;
+	let pending = $state<Pending>(null);
+	let pendingBusy = $state(false);
 
 	async function refresh() {
 		try {
@@ -57,32 +65,36 @@
 		}
 	}
 
-	async function remove(name: string, force = false) {
-		if (!confirm(`Remove volume ${name.slice(0, 12)}?`)) return;
-		busy[name] = true;
+	async function runPending() {
+		if (!pending) return;
+		const { vol, force } = pending;
+		busy[vol.name] = true;
+		pendingBusy = true;
 		try {
-			await api.removeVolume(id, name, force);
-			if (inspectVolName === name) { inspectVolName = null; inspectData = null; }
+			await api.removeVolume(id, vol.name, force);
+			if (inspectVolName === vol.name) { inspectVolName = null; inspectData = null; }
 			await refresh();
 		} catch (e) {
 			error = (e as Error).message;
 		} finally {
-			busy[name] = false;
+			busy[vol.name] = false;
+			pendingBusy = false;
+			pending = null;
 		}
 	}
 
-	function openCreate() { 
-		form = blankForm(); 
-		optKey = ''; optVal = ''; 
-		labelKey = ''; labelVal = ''; 
-		createError = null; 
-		showCreate = true; 
+	function openCreate() {
+		form = blankForm();
+		optKey = ''; optVal = '';
+		labelKey = ''; labelVal = '';
+		createError = null;
+		showCreate = true;
 	}
 
 	async function submitCreate(ev: Event) {
 		ev.preventDefault();
 		createError = null;
-		if (!form.name.trim()) { createError = 'name is required'; return; }
+		if (!form.name.trim()) { createError = 'Name is required'; return; }
 		creating = true;
 		try {
 			await api.createVolume(id, { ...form, name: form.name.trim() });
@@ -98,13 +110,13 @@
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
 		if (showCreate) { showCreate = false; return; }
+		if (pending) { pending = null; return; }
 		if (inspectVolName) { inspectVolName = null; inspectData = null; return; }
 	}
 
-	onMount(async () => {
+	onMount(() => {
 		refresh();
 		timer = setInterval(refresh, 5000);
-		try { const h = await api.host(id); hostName = h.name; } catch { /* best-effort */ }
 	});
 
 	onDestroy(() => {
@@ -112,268 +124,302 @@
 	});
 </script>
 
-<svelte:head><title>Aperture — {hostName || id} — Volumes</title></svelte:head>
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="page-header">
-	<div>
-		<a href={`/hosts/${id}/overview`} class="back">← back to host</a>
-		<h1>Volumes</h1>
-		<div class="muted small">{volumes.length} total</div>
-	</div>
-	<button onclick={openCreate}>+ New volume</button>
-</div>
+<section class="volumes-tab">
+	<header class="tab-head">
+		<div class="lead">
+			<h2>Volumes</h2>
+			<span class="lead-sub mono">{volumes.length} total</span>
+		</div>
+		<Button variant="primary" onclick={openCreate}>+ New Volume</Button>
+	</header>
 
-<!-- Sub-navigation -->
-<nav class="subnav">
-	<a href={`/hosts/${id}/overview`}>Overview</a>
-	<a href={`/hosts/${id}/containers`}>Containers</a>
-	<a href={`/hosts/${id}/stacks`}>Stacks</a>
-	<a href={`/hosts/${id}/networks`}>Networks</a>
-	<a href={`/hosts/${id}/logs`}>Logs</a>
-	<a href={`/hosts/${id}/volumes`} class="active">Volumes</a>
-	<a href={`/hosts/${id}/images`}>Images</a>
-</nav>
+	{#if error}
+		<div class="error-banner">
+			<span>{error}</span>
+			<Button variant="icon" size="sm" ariaLabel="Dismiss" onclick={() => (error = null)}>
+				<Icon name="x" size={12} />
+			</Button>
+		</div>
+	{/if}
 
-{#if error}
-	<div class="card err">{error} <button class="x" onclick={() => (error = null)}>×</button></div>
-{/if}
-
-<div class="card no-pad">
-	<table>
-		<thead>
-			<tr>
-				<th>Name</th>
-				<th>Driver</th>
-				<th>Size</th>
-				<th>Usage</th>
-				<th>Created</th>
-				<th>Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each volumes as v (v.name)}
-				<tr class:expanded={inspectVolName === v.name} onclick={() => openInspect(v.name)}>
-					<td>
-						<div class="vname">{v.name}</div>
-					</td>
-					<td><span class="pill">{v.driver}</span></td>
-					<td class="mono small">{formatBytes(v.size_bytes)}</td>
-					<td>
-						{#if v.ref_count > 0}
-							<span class="pill usage">In use ({v.ref_count})</span>
-						{:else}
-							<span class="pill unused">Unused</span>
-						{/if}
-					</td>
-					<td class="mono small muted" title={absTime(v.created_at)}>{relTime(v.created_at)}</td>
-					<td class="actions" onclick={(e) => e.stopPropagation()}>
-						<button class="danger" disabled={busy[v.name]} onclick={() => remove(v.name)}>Remove</button>
-					</td>
+	<div class="table-wrap">
+		<table>
+			<thead>
+				<tr>
+					<th>Name</th>
+					<th>Driver</th>
+					<th>Size</th>
+					<th>Usage</th>
+					<th>Created</th>
+					<th class="actions-col">Actions</th>
 				</tr>
-
-				<!-- Expand: deep inspect panel -->
-				{#if inspectVolName === v.name}
-					<tr class="inspect-row">
-						<td colspan="6" class="inspect-cell">
-							{#if inspectLoading}
-								<div class="muted small">Loading…</div>
-							{:else if inspectData}
-								<div class="inspect-grid">
-									<!-- Left: config -->
-									<div class="inspect-col">
-										<div class="inspect-section">
-											<div class="section-label">Configuration</div>
-											<div class="kv">
-												<span class="k">Name</span><span class="v mono">{inspectData.name}</span>
-												<span class="k">Driver</span><span class="v mono">{inspectData.driver}</span>
-												<span class="k">Scope</span><span class="v mono">{inspectData.scope}</span>
-												<span class="k">Mountpoint</span><span class="v mono small">{inspectData.mountpoint}</span>
-											</div>
-										</div>
-
-										{#if inspectData.options && Object.keys(inspectData.options).length > 0}
-											<div class="inspect-section">
-												<div class="section-label">Driver Options</div>
-												<div class="env-list">
-													{#each Object.entries(inspectData.options) as [k,v]}
-														<div class="mono small">{k}={v}</div>
-													{/each}
-												</div>
-											</div>
-										{/if}
-
-										{#if Object.keys(inspectData.labels || {}).length > 0}
-											<div class="inspect-section">
-												<div class="section-label">Labels</div>
-												<div class="env-list">
-													{#each Object.entries(inspectData.labels || {}) as [k,v]}
-														<div class="mono small">{k}={v}</div>
-													{/each}
-												</div>
-											</div>
-										{/if}
-									</div>
-
-									<!-- Right: usage / actions -->
-									<div class="inspect-col">
-										<div class="inspect-section">
-											<div class="section-label">Usage</div>
-											<div class="kv">
-												<span class="k">Total Size</span><span class="v mono">{formatBytes(inspectData.size_bytes)}</span>
-												<span class="k">Containers</span><span class="v mono">{inspectData.ref_count} references</span>
-											</div>
-										</div>
-										<div class="inspect-section">
-											<div class="section-label">Actions</div>
-											<div class="action-buttons">
-												<button class="danger" disabled={busy[v.name]} onclick={() => remove(v.name)}>Remove Volume</button>
-												<button class="danger force" disabled={busy[v.name]} onclick={() => remove(v.name, true)} title="Force remove the volume, even if it is in use">Force Remove</button>
-											</div>
-										</div>
-									</div>
-								</div>
+			</thead>
+			<tbody>
+				{#each volumes as v (v.name)}
+					<tr class:expanded={inspectVolName === v.name} onclick={() => openInspect(v.name)}>
+						<td>
+							<div class="vname">{v.name}</div>
+						</td>
+						<td><span class="pill">{v.driver}</span></td>
+						<td class="mono micro">{formatBytes(v.size_bytes)}</td>
+						<td>
+							{#if v.ref_count > 0}
+								<span class="pill in-use">In use ({v.ref_count})</span>
+							{:else}
+								<span class="pill unused">Unused</span>
 							{/if}
 						</td>
+						<td class="mono micro muted" title={absTime(v.created_at)}>{relTime(v.created_at)}</td>
+						<td class="actions" onclick={(e) => e.stopPropagation()}>
+							<Button variant="danger" size="sm" disabled={busy[v.name]} onclick={() => { pending = { vol: v, force: false }; }}>Remove</Button>
+						</td>
 					</tr>
+
+					{#if inspectVolName === v.name}
+						<tr class="inspect-row">
+							<td colspan="6" class="inspect-cell">
+								{#if inspectLoading}
+									<div class="muted micro">Loading…</div>
+								{:else if inspectData}
+									<div class="inspect-grid">
+										<div class="inspect-col">
+											<div class="inspect-section">
+												<div class="section-label">Configuration</div>
+												<div class="kv">
+													<span class="k">Name</span><span class="v mono">{inspectData.name}</span>
+													<span class="k">Driver</span><span class="v mono">{inspectData.driver}</span>
+													<span class="k">Scope</span><span class="v mono">{inspectData.scope}</span>
+													<span class="k">Mountpoint</span><span class="v mono micro">{inspectData.mountpoint}</span>
+												</div>
+											</div>
+
+											{#if inspectData.options && Object.keys(inspectData.options).length > 0}
+												<div class="inspect-section">
+													<div class="section-label">Driver options</div>
+													<div class="env-list">
+														{#each Object.entries(inspectData.options) as [k, val]}
+															<div class="mono micro">{k}={val}</div>
+														{/each}
+													</div>
+												</div>
+											{/if}
+
+											{#if Object.keys(inspectData.labels || {}).length > 0}
+												<div class="inspect-section">
+													<div class="section-label">Labels</div>
+													<div class="env-list">
+														{#each Object.entries(inspectData.labels || {}) as [k, val]}
+															<div class="mono micro">{k}={val}</div>
+														{/each}
+													</div>
+												</div>
+											{/if}
+										</div>
+
+										<div class="inspect-col">
+											<div class="inspect-section">
+												<div class="section-label">Usage</div>
+												<div class="kv">
+													<span class="k">Size</span><span class="v mono">{formatBytes(inspectData.size_bytes)}</span>
+													<span class="k">Containers</span><span class="v mono">{inspectData.ref_count} reference{inspectData.ref_count === 1 ? '' : 's'}</span>
+												</div>
+											</div>
+											<div class="inspect-section">
+												<div class="section-label">Actions</div>
+												<div class="action-buttons">
+													<Button variant="danger" size="md" disabled={busy[v.name]} onclick={() => { pending = { vol: v, force: false }; }}>Remove volume</Button>
+													<Button variant="danger" size="md" disabled={busy[v.name]} onclick={() => { pending = { vol: v, force: true }; }}>Force remove</Button>
+												</div>
+											</div>
+										</div>
+									</div>
+								{/if}
+							</td>
+						</tr>
+					{/if}
+				{/each}
+				{#if volumes.length === 0 && !error}
+					<tr><td colspan="6" class="empty-row">No volumes.</td></tr>
 				{/if}
-			{/each}
-			{#if volumes.length === 0 && !error}
-				<tr><td colspan="6" class="muted center">no volumes</td></tr>
-			{/if}
-		</tbody>
-	</table>
-</div>
-
-<!-- Create modal -->
-{#if showCreate}
-	<div class="modal-bg" onclick={() => (showCreate = false)} role="presentation">
-		<div class="modal create" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-			<div class="modal-head">
-				<div>New volume</div>
-				<button onclick={() => (showCreate = false)}>close</button>
-			</div>
-			<form onsubmit={submitCreate} class="create-form">
-				<label class="row">
-					<span>Name *</span>
-					<input type="text" placeholder="my-volume" bind:value={form.name} required />
-				</label>
-				<label class="row">
-					<span>Driver</span>
-					<input type="text" placeholder="local" bind:value={form.driver} />
-				</label>
-
-				<div class="env-editor">
-					<div class="section-label">Driver Options</div>
-					{#each Object.entries(form.driver_opts || {}) as [k, v]}
-						<div class="env-row">
-							<input type="text" readonly value={k} class="mono small" />
-							<input type="text" readonly value={v} class="mono small" />
-							<button type="button" class="x" onclick={() => { const o = { ...form.driver_opts }; delete o[k]; form.driver_opts = o; }}>×</button>
-						</div>
-					{/each}
-					<div class="env-row new-env">
-						<input type="text" placeholder="type" bind:value={optKey} class="mono small" />
-						<input type="text" placeholder="nfs" bind:value={optVal} class="mono small" />
-						<button type="button" onclick={() => { if(optKey) { form.driver_opts = {...form.driver_opts, [optKey]: optVal}; optKey=''; optVal=''; } }}>Add</button>
-					</div>
-				</div>
-
-				<div class="env-editor mt">
-					<div class="section-label">Labels</div>
-					{#each Object.entries(form.labels || {}) as [k, v]}
-						<div class="env-row">
-							<input type="text" readonly value={k} class="mono small" />
-							<input type="text" readonly value={v} class="mono small" />
-							<button type="button" class="x" onclick={() => { const l = { ...form.labels }; delete l[k]; form.labels = l; }}>×</button>
-						</div>
-					{/each}
-					<div class="env-row new-env">
-						<input type="text" placeholder="key" bind:value={labelKey} class="mono small" />
-						<input type="text" placeholder="value" bind:value={labelVal} class="mono small" />
-						<button type="button" onclick={() => { if(labelKey) { form.labels = {...form.labels, [labelKey]: labelVal}; labelKey=''; labelVal=''; } }}>Add</button>
-					</div>
-				</div>
-
-				{#if createError}
-					<div class="err-box">{createError}</div>
-				{/if}
-
-				<div class="foot">
-					<button type="button" onclick={() => (showCreate = false)}>Cancel</button>
-					<button type="submit" class="primary" disabled={creating || !form.name.trim()}>{creating ? 'Creating…' : 'Create'}</button>
-				</div>
-			</form>
-		</div>
+			</tbody>
+		</table>
 	</div>
-{/if}
+</section>
+
+<Modal open={showCreate} onclose={() => (showCreate = false)} title="New volume" width="480px">
+	<form onsubmit={submitCreate} class="create-form">
+		<label class="row">
+			<span>Name *</span>
+			<input type="text" placeholder="my-volume" bind:value={form.name} required />
+		</label>
+		<label class="row">
+			<span>Driver</span>
+			<input type="text" placeholder="local" bind:value={form.driver} />
+		</label>
+
+		<div class="env-editor">
+			<div class="section-label">Driver options</div>
+			{#each Object.entries(form.driver_opts || {}) as [k, val]}
+				<div class="env-row">
+					<input type="text" readonly value={k} />
+					<input type="text" readonly value={val} />
+					<Button variant="icon" size="sm" ariaLabel="Remove" onclick={() => { const o = { ...form.driver_opts }; delete o[k]; form.driver_opts = o; }}>
+						<Icon name="x" size={12} />
+					</Button>
+				</div>
+			{/each}
+			<div class="env-row new-env">
+				<input type="text" placeholder="key" bind:value={optKey} />
+				<input type="text" placeholder="value" bind:value={optVal} />
+				<Button variant="ghost" size="sm" onclick={() => { if (optKey) { form.driver_opts = { ...form.driver_opts, [optKey]: optVal }; optKey = ''; optVal = ''; } }}>Add</Button>
+			</div>
+		</div>
+
+		<div class="env-editor mt">
+			<div class="section-label">Labels</div>
+			{#each Object.entries(form.labels || {}) as [k, val]}
+				<div class="env-row">
+					<input type="text" readonly value={k} />
+					<input type="text" readonly value={val} />
+					<Button variant="icon" size="sm" ariaLabel="Remove" onclick={() => { const l = { ...form.labels }; delete l[k]; form.labels = l; }}>
+						<Icon name="x" size={12} />
+					</Button>
+				</div>
+			{/each}
+			<div class="env-row new-env">
+				<input type="text" placeholder="key" bind:value={labelKey} />
+				<input type="text" placeholder="value" bind:value={labelVal} />
+				<Button variant="ghost" size="sm" onclick={() => { if (labelKey) { form.labels = { ...form.labels, [labelKey]: labelVal }; labelKey = ''; labelVal = ''; } }}>Add</Button>
+			</div>
+		</div>
+
+		{#if createError}
+			<div class="err-text">{createError}</div>
+		{/if}
+		<div class="form-actions">
+			<Button variant="ghost" onclick={() => (showCreate = false)}>Cancel</Button>
+			<Button variant="primary" type="submit" loading={creating} disabled={!form.name.trim()}>{creating ? 'Creating…' : 'Create'}</Button>
+		</div>
+	</form>
+</Modal>
+
+<ConfirmDialog
+	open={pending !== null}
+	tone="danger"
+	title={pending?.force ? 'Force remove volume' : 'Remove volume'}
+	message={pending?.force
+		? 'Force remove this volume even if it is referenced by a container?'
+		: 'Remove this Docker volume?'}
+	detail={pending?.vol.name ?? ''}
+	consequences={pending?.force
+		? [
+			'All data stored in this volume will be permanently deleted.',
+			'Containers referencing this volume may fail until reconfigured.'
+		]
+		: [
+			'All data stored in this volume will be permanently deleted.',
+			'The volume cannot be in use by any container; otherwise this will fail.'
+		]}
+	confirmLabel={pending?.force ? 'Force remove' : 'Remove'}
+	busy={pendingBusy}
+	onconfirm={runPending}
+	oncancel={() => (pending = null)}
+/>
 
 <style>
-	.page-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; }
-	.back { font-size: 12px; color: var(--text-dim); }
-	h1 { margin: 4px 0; font-size: 22px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
-	.small { font-size: 11px; }
+	.volumes-tab { display: flex; flex-direction: column; gap: 12px; }
 
-	/* Subnav */
-	.subnav { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
-	.subnav a { padding: 8px 16px; font-size: 13px; color: var(--text-dim); border-bottom: 2px solid transparent; margin-bottom: -1px; }
-	.subnav a:hover { color: var(--text); text-decoration: none; }
-	.subnav a.active { color: var(--accent); border-bottom-color: var(--accent); }
-	.subnav a.placeholder { opacity: 0.45; cursor: default; }
+	.tab-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+	.lead { display: flex; align-items: baseline; gap: 10px; }
+	.lead h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
+	.lead-sub { font-size: 11px; color: var(--text-faint); }
 
-	.vname { font-weight: 500; margin-bottom: 2px; }
-	.pill {
-		display: inline-block; padding: 2px 6px; border-radius: 4px;
-		background: var(--bg-elev); font-size: 11px; color: var(--text-dim);
+	.error-banner {
+		display: flex; justify-content: space-between; align-items: center; gap: 8px;
+		padding: 8px 12px;
+		background: var(--crit-soft);
+		border: 1px solid color-mix(in srgb, var(--crit) 40%, transparent);
+		border-radius: var(--r-md);
+		color: var(--crit);
+		font-size: 12px;
 	}
-	.usage { background: rgba(92,200,255,0.1); color: var(--accent); border: 1px solid rgba(92,200,255,0.2); }
-	.unused { background: var(--bg-elev-2); border: 1px solid var(--border); }
-	
-	.err { color: var(--bad); border-color: var(--bad); margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
-	button.x { background: transparent; border: none; font-size: 16px; color: var(--bad); padding: 0 4px; }
-	
-	table { width: 100%; border-collapse: collapse; font-size: 13px; }
-	th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
-	th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); font-weight: 600; }
-	tr { transition: background 0.15s; }
-	tr:hover:not(.inspect-row) { background: var(--bg-elev); cursor: pointer; }
-	tr.expanded { background: var(--bg-elev); border-left: 2px solid var(--accent); }
 
-	.actions { text-align: right; }
-	.actions button { font-size: 11px; padding: 4px 8px; }
-	button.danger { border-color: rgba(255,107,107,0.3); color: var(--bad); }
-	button.danger:hover { background: rgba(255,107,107,0.1); border-color: var(--bad); }
-	button.danger.force { background: rgba(255,107,107,0.05); }
+	.table-wrap { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+	table { width: 100%; border-collapse: collapse; font-size: 12px; }
+	th {
+		padding: 8px 12px;
+		font-family: var(--font-mono); font-size: 10px;
+		font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+		text-align: left; color: var(--text-faint);
+		border-bottom: 1px solid var(--line);
+		background: var(--bg-elev);
+	}
+	td { padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--text-dim); vertical-align: middle; }
+	tbody tr:last-child td { border-bottom: none; }
+	tbody tr { cursor: pointer; transition: background 120ms; }
+	tbody tr:hover:not(.inspect-row) td { background: var(--bg-hover); color: var(--text); }
+	tbody tr.expanded > td { background: var(--bg-elev-2); }
 
-	/* Deep inspect */
-	.inspect-row { background: var(--bg-elev-2) !important; border-bottom: 2px solid var(--border) !important; }
-	.inspect-cell { padding: 16px 20px; }
-	.inspect-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
-	.inspect-section { margin-bottom: 20px; }
-	.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 8px; font-weight: 600; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
-	.kv { display: grid; grid-template-columns: 80px 1fr; gap: 6px; font-size: 13px; }
-	.k { color: var(--text-dim); }
-	.env-list { background: var(--bg); padding: 8px 12px; border-radius: 4px; display: flex; flex-direction: column; gap: 4px; max-height: 150px; overflow-y: auto; border: 1px solid var(--border); }
-	.action-buttons { display: flex; gap: 8px; flex-direction: column; max-width: 150px; }
+	.vname { font-weight: 500; color: var(--text); font-size: 12px; }
+	.muted { color: var(--text-faint); }
+	.micro { font-size: 10px; }
+	.pill.in-use { background: var(--accent-soft); color: var(--accent); }
+	.pill.unused { background: var(--bg-elev-2); color: var(--text-faint); border: 1px solid var(--line); }
 
-	/* Modal */
-	.modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(2px); z-index: 100; display: flex; align-items: center; justify-content: center; }
-	.modal { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; width: 440px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); display: flex; flex-direction: column; max-height: 90vh; }
-	.modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
-	.modal-head button { font-size: 12px; padding: 4px 8px; }
-	.create-form { padding: 20px; overflow-y: auto; }
-	.row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
-	.row span { font-size: 12px; color: var(--text-dim); font-weight: 500; }
-	.row input, .env-row input { background: var(--bg); border: 1px solid var(--border); padding: 8px 12px; color: var(--text); border-radius: 4px; font-size: 13px; width: 100%; box-sizing: border-box; }
-	.row input:focus, .env-row input:focus { outline: none; border-color: var(--accent); }
-	
-	.env-editor.mt { margin-top: 16px; }
-	.env-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
-	.env-row button { padding: 4px 10px; font-size: 12px; }
-	.new-env { margin-top: 8px; }
-	
-	.err-box { padding: 10px; margin-top: 16px; background: rgba(255,107,107,0.1); border: 1px solid var(--bad); color: var(--bad); font-size: 13px; border-radius: 4px; }
-	.foot { margin-top: 24px; display: flex; justify-content: flex-end; gap: 12px; }
-	button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-	button.primary:hover:not(:disabled) { background: #4bb3e6; }
+	.actions-col { text-align: right; }
+	.actions { display: flex; gap: 4px; justify-content: flex-end; cursor: default; }
+
+	.empty-row { text-align: center; padding: 32px 12px; color: var(--text-faint); font-size: 12px; cursor: default; }
+
+	.inspect-row td { cursor: default; background: var(--bg-elev-2); }
+	.inspect-cell { padding: 16px 20px; border-top: 1px solid var(--line); }
+	.inspect-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+	@media (max-width: 900px) { .inspect-grid { grid-template-columns: 1fr; } }
+	.inspect-col { display: flex; flex-direction: column; gap: 16px; }
+	.inspect-section { display: flex; flex-direction: column; gap: 6px; }
+	.section-label {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-faint);
+		padding-bottom: 4px;
+		border-bottom: 1px solid var(--line);
+	}
+
+	.kv { display: grid; grid-template-columns: 100px 1fr; gap: 4px 12px; font-size: 12px; }
+	.k { color: var(--text-faint); }
+	.v { font-family: var(--font-mono); word-break: break-all; color: var(--text); }
+
+	.env-list { max-height: 200px; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+	.action-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+
+	.create-form { display: flex; flex-direction: column; gap: 10px; }
+	.create-form .row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; align-items: center; }
+	.create-form .row > span { font-size: 12px; color: var(--text-dim); }
+	.create-form input[type="text"] {
+		background: var(--bg-elev-2);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
+		color: var(--text);
+		padding: 6px 10px;
+		font-size: 12px;
+	}
+	.env-editor.mt { margin-top: 8px; }
+	.env-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; margin-bottom: 4px; align-items: center; }
+	.env-row input {
+		background: var(--bg-elev-2);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md);
+		color: var(--text);
+		padding: 5px 8px;
+		font-size: 11px;
+		font-family: var(--font-mono);
+	}
+	.new-env { margin-top: 6px; }
+	.err-text { color: var(--crit); font-size: 11px; }
+	.form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 </style>

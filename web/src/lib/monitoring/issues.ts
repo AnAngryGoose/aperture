@@ -17,6 +17,7 @@
 import type { HostEntry } from '$lib/stores/monitoring.svelte';
 import type { OverviewAlertEvent } from '$lib/types';
 import { fmtBytes, fmtRelative } from '$lib/format';
+import { humanizeAlert, formatMetricValue } from './humanizeAlert';
 
 export type Severity = 'crit' | 'warn';
 
@@ -177,13 +178,18 @@ export function deriveIssues(entries: HostEntry[], events: OverviewAlertEvent[] 
 		eventHostCounts.set(ev.host_id, (eventHostCounts.get(ev.host_id) ?? 0) + 1);
 		const host = byHost.get(ev.host_id);
 		const hostName = host?.host.name ?? ev.host_id;
+		const h = humanizeAlert({
+			metric: ev.metric, op: ev.op, threshold: ev.threshold, value: ev.value
+		});
 		out.push({
 			hostId: ev.host_id,
 			hostName,
 			severity: eventSeverity(ev.severity),
 			kind: 'alert',
-			reason: `Alert: ${ev.metric} ${ev.op} ${formatThreshold(ev.threshold)}`,
-			detail: `value ${formatThreshold(ev.value)}`,
+			reason: h.title,
+			detail: typeof ev.value === 'number'
+				? `Current: ${formatMetricValue(ev.metric, ev.value)} · Threshold: ${formatMetricValue(ev.metric, ev.threshold)}`
+				: `Threshold: ${formatMetricValue(ev.metric, ev.threshold)}`,
 			href: hostHref(ev.host_id, 'events')
 		});
 	}
@@ -217,16 +223,6 @@ export function deriveIssues(entries: HostEntry[], events: OverviewAlertEvent[] 
 		return a.kind.localeCompare(b.kind);
 	});
 	return out;
-}
-
-// Compact threshold formatter — uses one decimal for fractions, none for
-// integers, so "90" stays "90" and "0.85" stays "0.85" rather than turning
-// into "90.0" / "0.9". Keeps alert titles tidy.
-function formatThreshold(v: number): string {
-	if (Number.isInteger(v)) return String(v);
-	if (Math.abs(v) >= 100) return v.toFixed(0);
-	if (Math.abs(v) >= 10) return v.toFixed(1);
-	return v.toFixed(2);
 }
 
 /**

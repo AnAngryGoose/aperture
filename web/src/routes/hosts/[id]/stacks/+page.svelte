@@ -2,40 +2,38 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
-	import type { ComposeStack, ComposeService, ComposeVersion } from '$lib/types';
+	import type { ComposeStack, ComposeVersion } from '$lib/types';
 	import { toast } from '$lib/toast';
+	import Button from '$lib/components/primitives/Button.svelte';
+	import ConfirmDialog from '$lib/components/primitives/ConfirmDialog.svelte';
+	import Modal from '$lib/components/primitives/Modal.svelte';
+	import Icon from '$lib/components/primitives/Icon.svelte';
 
-	let id = $derived(page.params.id);
-	let hostName = $state('');
+	let id = $derived(page.params.id ?? '');
 	let stacks = $state<ComposeStack[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let composeAvailable = $state(true);
 
-	// Per-stack expanded state and active tab
 	let expanded = $state<Record<string, boolean>>({});
 	let activeTab = $state<Record<string, 'services' | 'file' | 'logs'>>({});
 	let actionBusy = $state<Record<string, boolean>>({});
 	let actionOutput = $state<Record<string, string>>({});
 
-	// Per-stack file editor state
 	let fileContent = $state<Record<string, string>>({});
 	let fileLoading = $state<Record<string, boolean>>({});
 	let fileDirty = $state<Record<string, boolean>>({});
 	let fileSaving = $state<Record<string, boolean>>({});
 
-	// Per-stack log state
 	let logContent = $state<Record<string, string>>({});
 	let logLoading = $state<Record<string, boolean>>({});
 	let logService = $state<Record<string, string>>({});
 	let logTail = $state<Record<string, number>>({});
 
-	// History
 	let historyOpen = $state<Record<string, boolean>>({});
 	let historyLoading = $state<Record<string, boolean>>({});
 	let versions = $state<Record<string, ComposeVersion[]>>({});
 
-	// New stack modal
 	let newModal = $state(false);
 	let newDir = $state('');
 	let newContent = $state(`services:
@@ -49,26 +47,22 @@
 	let newSaving = $state(false);
 	let newError = $state('');
 
-	// Delete confirm
 	let deleteTarget = $state<string | null>(null);
 	let deleteVolumes = $state(false);
+	let deleteBusy = $state(false);
 
 	let timer: ReturnType<typeof setInterval> | null = null;
 
 	async function load(quiet = false) {
 		if (!quiet) loading = true;
 		try {
-			const [h, s] = await Promise.all([
-				api.host(id).catch(() => null),
-				api.composeStacks(id).catch((e: Error) => {
-					if (e.message.includes('503') || e.message.includes('not available')) {
-						composeAvailable = false;
-					}
-					return [] as ComposeStack[];
-				})
-			]);
+			const s = await api.composeStacks(id).catch((e: Error) => {
+				if (e.message.includes('503') || e.message.includes('not available')) {
+					composeAvailable = false;
+				}
+				return [] as ComposeStack[];
+			});
 
-			// Fetch detailed services for expanded stacks
 			const expandedProjects = s.filter(st => expanded[st.project]).map(st => st.project);
 			if (expandedProjects.length > 0) {
 				const details = await Promise.all(
@@ -82,7 +76,6 @@
 				}
 			}
 
-			hostName = h?.name ?? id;
 			stacks = s;
 			composeAvailable = true;
 			error = null;
@@ -103,9 +96,7 @@
 		try {
 			const res = await api.composeStack(id, project);
 			const idx = stacks.findIndex(s => s.project === project);
-			if (idx !== -1) {
-				stacks[idx] = res;
-			}
+			if (idx !== -1) stacks[idx] = res;
 		} catch (e) {
 			toast.error(`Failed to load services: ${(e as Error).message}`);
 		}
@@ -114,9 +105,7 @@
 	function toggleExpand(project: string) {
 		expanded[project] = !expanded[project];
 		if (expanded[project]) {
-			if (!activeTab[project]) {
-				activeTab[project] = 'services';
-			}
+			if (!activeTab[project]) activeTab[project] = 'services';
 			loadServices(project);
 		}
 	}
@@ -193,20 +182,18 @@
 	}
 
 	async function restoreVersion(project: string, vid: number) {
-		if (!confirm("Are you sure you want to load this version into the editor? You will still need to Save to apply it.")) return;
 		try {
 			const v = await api.composeVersionContent(id, vid);
 			if (v && v.content) {
 				fileContent[project] = v.content;
 				fileDirty[project] = true;
 				historyOpen[project] = false;
+				toast.info('Version loaded into editor — Save or Save + Deploy to apply.');
 			}
 		} catch(e) {
 			toast.error(`Restore error: ${(e as Error).message}`);
 		}
 	}
-
-	// --- Actions ---
 
 	async function stackAction(project: string, action: string, service = '', extra: Record<string, unknown> = {}) {
 		const st = stacks.find(s => s.project === project);
@@ -223,8 +210,7 @@
 			toast.success(`${action} completed`);
 			load(true);
 		} catch (e) {
-			const msg = (e as Error).message;
-			actionOutput[project] = msg;
+			actionOutput[project] = (e as Error).message;
 			toast.error(`${action} failed`);
 		} finally {
 			actionBusy[key] = false;
@@ -241,6 +227,7 @@
 
 	async function doDelete() {
 		if (!deleteTarget) return;
+		deleteBusy = true;
 		try {
 			await api.deleteComposeStack(id, deleteTarget, deleteVolumes);
 			toast.success(`Stack "${deleteTarget}" stopped`);
@@ -248,6 +235,8 @@
 			load(true);
 		} catch (e) {
 			toast.error(`Down failed: ${(e as Error).message}`);
+		} finally {
+			deleteBusy = false;
 		}
 	}
 
@@ -275,10 +264,39 @@
 		}
 	}
 
-	function statusColor(status: string) {
-		if (status === 'running') return 'status-running';
-		if (status === 'partial') return 'status-partial';
-		return 'status-stopped';
+	// Humanized stack health: instead of "0/0 running RUNNING", we read the
+	// running/total counts and the backend-reported status string to derive
+	// one of: running, partial, stopped, empty, unknown, error.
+	type Health = 'running' | 'partial' | 'stopped' | 'empty' | 'unknown' | 'error';
+
+	function healthOf(st: ComposeStack): Health {
+		const status = (st.status || '').toLowerCase();
+		const total = st.total_count ?? st.services?.length ?? 0;
+		const running = st.running_count ?? 0;
+		if (status === 'error') return 'error';
+		if (total === 0) return 'empty';
+		if (running === total && total > 0) return 'running';
+		if (running > 0 && running < total) return 'partial';
+		if (running === 0) return 'stopped';
+		return 'unknown';
+	}
+
+	function healthLabel(h: Health): string {
+		switch (h) {
+			case 'running':  return 'Running';
+			case 'partial':  return 'Partial';
+			case 'stopped':  return 'Stopped';
+			case 'empty':    return 'No services';
+			case 'error':    return 'Error';
+			default:         return 'Unknown';
+		}
+	}
+
+	function healthSummary(st: ComposeStack): string {
+		const total = st.total_count ?? st.services?.length ?? 0;
+		const running = st.running_count ?? 0;
+		if (total === 0) return 'no services defined';
+		return `${running} of ${total} running`;
 	}
 
 	function serviceStateColor(state: string) {
@@ -301,80 +319,118 @@
 			if (newModal) { newModal = false; return; }
 		}
 	}
+
+	// Confirmation for stack actions
+	type Pending = {
+		project: string;
+		action: 'down' | 'restart' | 'pull';
+		title: string;
+		message: string;
+		detail: string;
+		consequences: string[];
+		tone: 'warning' | 'danger';
+		confirmLabel: string;
+	} | null;
+	let pending = $state<Pending>(null);
+
+	function confirmStackAction(project: string, action: 'restart' | 'pull') {
+		const labels: Record<typeof action, Omit<NonNullable<Pending>, 'project' | 'action'>> = {
+			restart: {
+				title: 'Restart stack',
+				message: 'Restart all services in this stack?',
+				detail: project,
+				tone: 'warning',
+				confirmLabel: 'Restart stack',
+				consequences: ['Containers will briefly stop and start again.', 'In-flight requests may be dropped.']
+			},
+			pull: {
+				title: 'Pull stack images',
+				message: 'Pull the latest images for every service in this stack?',
+				detail: project,
+				tone: 'warning',
+				confirmLabel: 'Pull images',
+				consequences: ['Newer images will be downloaded.', 'You will still need to recreate the stack to use them.']
+			}
+		};
+		pending = { project, action, ...labels[action] };
+	}
+
+	async function runPending() {
+		if (!pending) return;
+		const { project, action } = pending;
+		pending = null;
+		await stackAction(project, action);
+	}
 </script>
 
-<svelte:head><title>Aperture — Compose · {hostName}</title></svelte:head>
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="page">
-	<header class="page-header">
-		<div class="header-left">
-			<a href={`/hosts/${id}/overview`} class="back-link">← {hostName}</a>
-			<h1>Compose Stacks</h1>
+<section class="stacks-tab">
+	<header class="tab-head">
+		<div class="lead">
+			<h2>Compose Stacks</h2>
+			<span class="lead-sub mono">{stacks.length} stack{stacks.length === 1 ? '' : 's'}</span>
 		</div>
-		<button class="btn-primary" onclick={() => { newModal = true; newError = ''; }}>+ New Stack</button>
+		<Button variant="primary" onclick={() => { newModal = true; newError = ''; }}>+ New Stack</Button>
 	</header>
 
-	<!-- Sub-nav mirrors containers page -->
-	<nav class="sub-nav">
-		<a href={`/hosts/${id}/overview`}>Overview</a>
-		<a href={`/hosts/${id}/containers`}>Containers</a>
-		<a href={`/hosts/${id}/stacks`} class="active">Stacks</a>
-		<a href={`/hosts/${id}/networks`}>Networks</a>
-		<a href={`/hosts/${id}/logs`}>Logs</a>
-		<a href={`/hosts/${id}/volumes`}>Volumes</a>
-		<a href={`/hosts/${id}/images`}>Images</a>
-	</nav>
-
 	{#if loading}
-		<p class="muted centre">Loading stacks…</p>
+		<div class="state-msg">Loading stacks…</div>
 	{:else if !composeAvailable}
-		<div class="unavailable-banner">
+		<div class="banner">
 			<strong>Docker Compose not available</strong>
 			<p>This host is offline, or <code>docker compose</code> is not installed.</p>
 		</div>
 	{:else if error}
-		<p class="error-msg">{error}</p>
+		<div class="error-banner">{error}</div>
 	{:else if stacks.length === 0}
 		<div class="empty-state">
 			<p>No compose stacks found on this host.</p>
-			<p class="muted">Start a stack with <code>docker compose up -d</code> or create one below.</p>
-			<button class="btn-primary" onclick={() => { newModal = true; }}>+ New Stack</button>
+			<p class="muted">Start one with <code>docker compose up -d</code> or create a new stack.</p>
+			<Button variant="primary" onclick={() => { newModal = true; }}>+ New Stack</Button>
 		</div>
 	{:else}
 		<div class="stack-list">
 			{#each stacks as st (st.project)}
 				{@const isExpanded = expanded[st.project]}
 				{@const busy = anyBusy(st.project)}
+				{@const h = healthOf(st)}
 				<div class="stack-card" class:expanded={isExpanded}>
-					<!-- Stack header row -->
 					<div class="stack-header" role="button" tabindex="0"
 						onclick={() => toggleExpand(st.project)}
 						onkeydown={(e) => e.key === 'Enter' && toggleExpand(st.project)}>
-						<span class="status-dot {statusColor(st.status)}" title={st.status}></span>
+						<span class="status-dot status-{h}" title={healthLabel(h)}></span>
 						<div class="stack-identity">
 							<span class="stack-name">{st.project}</span>
 							{#if st.working_dir}
-								<span class="stack-dir" title={st.working_dir}>{st.working_dir}</span>
+								<span class="stack-dir mono" title={st.working_dir}>{st.working_dir}</span>
 							{/if}
 						</div>
 						<div class="stack-meta">
-							<span class="svc-count {statusColor(st.status)}">
-								{st.running_count ?? 0}/{st.total_count ?? 0} running
-							</span>
-							<span class="status-pill {statusColor(st.status)}">{st.status}</span>
+							<span class="svc-count mono">{healthSummary(st)}</span>
+							<span class="pill {h === 'running' ? 'ok' : h === 'partial' ? 'warn' : h === 'error' ? 'crit' : 'offline'}">{healthLabel(h)}</span>
 						</div>
 						<div class="stack-actions" role="none" onclick={(e) => e.stopPropagation()}>
-							<button class="act-btn" title="Start / up" disabled={busy}
-								onclick={() => stackAction(st.project, 'up')}>▶</button>
-							<button class="act-btn" title="Stop / down" disabled={busy}
-								onclick={() => stackAction(st.project, 'down')}>⏹</button>
-							<button class="act-btn" title="Restart" disabled={busy}
-								onclick={() => stackAction(st.project, 'restart')}>↺</button>
-							<button class="act-btn" title="Pull images" disabled={busy}
-								onclick={() => stackAction(st.project, 'pull')}>⬇</button>
+							<Button variant="icon" size="sm" ariaLabel="Start / up" title="Start / up" disabled={busy}
+								onclick={() => stackAction(st.project, 'up')}>
+								<Icon name="play" size={12} />
+							</Button>
+							<Button variant="icon" size="sm" ariaLabel="Stop / down" title="Stop / down" disabled={busy}
+								onclick={() => { deleteTarget = st.project; deleteVolumes = false; }}>
+								<Icon name="stop" size={12} />
+							</Button>
+							<Button variant="icon" size="sm" ariaLabel="Restart" title="Restart" disabled={busy}
+								onclick={() => confirmStackAction(st.project, 'restart')}>
+								<Icon name="restart" size={12} />
+							</Button>
+							<Button variant="icon" size="sm" ariaLabel="Pull images" title="Pull images" disabled={busy}
+								onclick={() => confirmStackAction(st.project, 'pull')}>
+								<Icon name="arrow-down" size={12} />
+							</Button>
 						</div>
-						<span class="chevron" class:open={isExpanded}>▾</span>
+						<span class="chev" class:open={isExpanded}>
+							<Icon name="chevron-down" size={14} />
+						</span>
 					</div>
 
 					{#if actionOutput[st.project]}
@@ -384,20 +440,18 @@
 					{#if isExpanded}
 						<div class="stack-detail">
 							<div class="tab-bar">
-								<button class:active={activeTab[st.project] === 'services'}
-									onclick={() => setTab(st.project, 'services')}>Services</button>
-								<button class:active={activeTab[st.project] === 'file'}
-									onclick={() => setTab(st.project, 'file')}>Compose File</button>
-								<button class:active={activeTab[st.project] === 'logs'}
-									onclick={() => setTab(st.project, 'logs')}>Logs</button>
+								<Button variant="outline" size="sm" active={activeTab[st.project] === 'services'}
+									onclick={() => setTab(st.project, 'services')}>Services</Button>
+								<Button variant="outline" size="sm" active={activeTab[st.project] === 'file'}
+									onclick={() => setTab(st.project, 'file')}>Compose File</Button>
+								<Button variant="outline" size="sm" active={activeTab[st.project] === 'logs'}
+									onclick={() => setTab(st.project, 'logs')}>Logs</Button>
 								<div class="tab-spacer"></div>
-								<button class="danger-sm" title="Stop and remove"
-									onclick={() => { deleteTarget = st.project; deleteVolumes = false; }}>
+								<Button variant="danger" size="sm" onclick={() => { deleteTarget = st.project; deleteVolumes = false; }}>
 									Down…
-								</button>
+								</Button>
 							</div>
 
-							<!-- Services tab -->
 							{#if activeTab[st.project] === 'services' || !activeTab[st.project]}
 								{#if st.services && st.services.length > 0}
 									<table class="svc-table">
@@ -417,7 +471,7 @@
 													<td class="svc-name">
 														{svc.name}
 														{#if svc.container_id}
-															<span class="cid">{svc.container_id}</span>
+															<span class="cid mono">{svc.container_id.slice(0, 12)}</span>
 														{/if}
 													</td>
 													<td>
@@ -430,7 +484,7 @@
 													<td class="svc-ports">
 														{#if svc.ports && svc.ports.length > 0}
 															{#each svc.ports as p}
-																<span class="port-tag">{p.public_port}:{p.private_port}/{p.type}</span>
+																<span class="port-tag mono">{p.public_port}:{p.private_port}/{p.type}</span>
 															{/each}
 														{:else}
 															<span class="muted">—</span>
@@ -438,52 +492,51 @@
 													</td>
 													<td class="svc-actions">
 														{#if svc.state === 'running'}
-															<button class="sm-btn" title="Restart service"
+															<Button variant="mini" size="sm"
 																disabled={isBusy(st.project, 'restart', svc.name)}
 																onclick={() => stackAction(st.project, 'restart', svc.name)}>
-																↺ restart
-															</button>
-															<button class="sm-btn" title="Stop service"
+																Restart
+															</Button>
+															<Button variant="mini" size="sm"
 																disabled={isBusy(st.project, 'stop', svc.name)}
 																onclick={() => stackAction(st.project, 'stop', svc.name)}>
-																⏹ stop
-															</button>
+																Stop
+															</Button>
 														{:else}
-															<button class="sm-btn" title="Start service"
+															<Button variant="mini" size="sm"
 																disabled={isBusy(st.project, 'start', svc.name)}
 																onclick={() => stackAction(st.project, 'start', svc.name)}>
-																▶ start
-															</button>
+																Start
+															</Button>
 														{/if}
-														<button class="sm-btn" title="View service logs"
+														<Button variant="mini" size="sm"
 															onclick={() => { setTab(st.project, 'logs'); logService[st.project] = svc.name; loadLogs(st.project); }}>
-															logs
-														</button>
+															Logs
+														</Button>
 													</td>
 												</tr>
 											{/each}
 										</tbody>
 									</table>
 								{:else}
-									<p class="muted pad">No containers found — stack may be stopped or loading. Use ▶ to start it.</p>
+									<p class="muted pad">No containers found — stack may be stopped or loading.</p>
 								{/if}
 							{/if}
 
-							<!-- File tab -->
 							{#if activeTab[st.project] === 'file'}
 								<div class="file-panel">
 									{#if fileLoading[st.project]}
 										<p class="muted">Loading compose file…</p>
 									{:else}
 										<div class="file-toolbar">
-											<span class="file-path muted">{st.working_dir}/compose.yml</span>
+											<span class="file-path mono">{st.working_dir}/compose.yml</span>
 											<div class="file-actions">
-												<button class="sm-btn" onclick={() => loadHistory(st.project)}>🕒 History</button>
-												<button class="sm-btn" onclick={() => loadFile(st.project)}>↻ Reload</button>
-												<button class="sm-btn" disabled={fileSaving[st.project] || !fileDirty[st.project]}
-													onclick={() => saveFile(st.project)}>Save</button>
-												<button class="btn-primary sm" disabled={fileSaving[st.project]}
-													onclick={() => saveFile(st.project, true)}>Save + Deploy</button>
+												<Button variant="ghost" size="sm" onclick={() => loadHistory(st.project)}>History</Button>
+												<Button variant="ghost" size="sm" onclick={() => loadFile(st.project)}>Reload</Button>
+												<Button variant="ghost" size="sm" disabled={fileSaving[st.project] || !fileDirty[st.project]}
+													onclick={() => saveFile(st.project)}>Save</Button>
+												<Button variant="primary" size="sm" loading={fileSaving[st.project]}
+													onclick={() => saveFile(st.project, true)}>Save + Deploy</Button>
 											</div>
 										</div>
 										<textarea class="yaml-editor"
@@ -492,45 +545,36 @@
 											spellcheck={false}
 											placeholder="Compose YAML will appear here…"></textarea>
 										{#if fileDirty[st.project]}
-											<p class="dirty-hint">Unsaved changes — Save to write, Save + Deploy to write and restart.</p>
+											<p class="dirty-hint mono">Unsaved changes — Save to write, Save + Deploy to write and restart.</p>
 										{/if}
 
-										{#if historyOpen[st.project]}
-											<div class="history-modal-bg" onclick={() => historyOpen[st.project] = false} role="presentation">
-												<div class="history-modal" onclick={e => e.stopPropagation()} role="dialog" aria-modal="true">
-													<div class="history-head">
-														<h3>Version History</h3>
-														<button class="sm-btn" onclick={() => historyOpen[st.project] = false}>Close</button>
-													</div>
-													<div class="history-body">
-														{#if historyLoading[st.project]}
-															<p class="muted">Loading history...</p>
-														{:else if !versions[st.project] || versions[st.project].length === 0}
-															<p class="muted">No backup versions found.</p>
-														{:else}
-															<ul class="version-list">
-																{#each versions[st.project] as v}
-																	<li>
-																		<div class="v-time">{new Date(v.created_at).toLocaleString()}</div>
-																		<button class="sm-btn" onclick={() => restoreVersion(st.project, v.id)}>Restore</button>
-																	</li>
-																{/each}
-															</ul>
-														{/if}
-													</div>
-												</div>
+										<Modal open={!!historyOpen[st.project]} onclose={() => historyOpen[st.project] = false} title="Version history" width="440px">
+											<div class="history-body">
+												{#if historyLoading[st.project]}
+													<p class="muted">Loading history…</p>
+												{:else if !versions[st.project] || versions[st.project].length === 0}
+													<p class="muted">No backup versions found.</p>
+												{:else}
+													<ul class="version-list">
+														{#each versions[st.project] as v}
+															<li>
+																<div class="v-time mono">{new Date(v.created_at).toLocaleString()}</div>
+																<Button variant="ghost" size="sm" onclick={() => restoreVersion(st.project, v.id)}>Restore</Button>
+															</li>
+														{/each}
+													</ul>
+												{/if}
 											</div>
-										{/if}
+										</Modal>
 									{/if}
 								</div>
 							{/if}
 
-							<!-- Logs tab -->
 							{#if activeTab[st.project] === 'logs'}
 								<div class="logs-panel">
 									<div class="logs-toolbar">
 										<label>
-											Service
+											<span class="label-mono">Service</span>
 											<select value={logService[st.project] ?? ''}
 												onchange={(e) => { logService[st.project] = (e.target as HTMLSelectElement).value; }}>
 												<option value="">All services</option>
@@ -540,7 +584,7 @@
 											</select>
 										</label>
 										<label>
-											Lines
+											<span class="label-mono">Lines</span>
 											<select value={logTail[st.project] ?? 200}
 												onchange={(e) => { logTail[st.project] = Number((e.target as HTMLSelectElement).value); }}>
 												<option value={50}>50</option>
@@ -549,10 +593,10 @@
 												<option value={1000}>1000</option>
 											</select>
 										</label>
-										<button class="sm-btn" onclick={() => loadLogs(st.project)}
-											disabled={logLoading[st.project]}>
-											{logLoading[st.project] ? 'Loading…' : '↻ Refresh'}
-										</button>
+										<Button variant="ghost" size="sm" onclick={() => loadLogs(st.project)}
+											loading={logLoading[st.project]}>
+											{logLoading[st.project] ? 'Loading…' : 'Refresh'}
+										</Button>
 									</div>
 									<pre class="log-output">{logLoading[st.project] ? 'Loading…' : (logContent[st.project] ?? '')}</pre>
 								</div>
@@ -563,304 +607,262 @@
 			{/each}
 		</div>
 	{/if}
-</div>
+</section>
 
-<!-- New Stack Modal -->
-{#if newModal}
-	<div class="modal-backdrop" onclick={() => { newModal = false; }} role="presentation">
-		<div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="New Compose Stack">
-			<h2>New Compose Stack</h2>
-			<div class="form-group">
-				<label for="new-dir">Directory path on host</label>
-				<input id="new-dir" type="text" bind:value={newDir}
-					placeholder="/opt/myapp or ~/stacks/nginx" />
-				<span class="hint">The compose.yml will be written here. Directory is created if it doesn't exist.</span>
-			</div>
-			<div class="form-group">
-				<label for="new-yaml">compose.yml content</label>
-				<textarea id="new-yaml" class="yaml-editor tall" bind:value={newContent} spellcheck={false}></textarea>
-			</div>
-			<div class="form-check">
-				<label>
-					<input type="checkbox" bind:checked={newStart} />
-					Start stack immediately after creating
-				</label>
-			</div>
-			{#if newError}
-				<p class="error-msg">{newError}</p>
-			{/if}
-			<div class="modal-footer">
-				<button onclick={() => { newModal = false; }}>Cancel</button>
-				<button class="btn-primary" onclick={createStack} disabled={newSaving}>
-					{newSaving ? 'Creating…' : 'Create Stack'}
-				</button>
-			</div>
+<!-- New stack modal -->
+<Modal open={newModal} onclose={() => (newModal = false)} title="New Compose Stack" width="620px">
+	<div class="form-stack">
+		<div class="form-group">
+			<label for="new-dir" class="label-mono">Directory path on host</label>
+			<input id="new-dir" type="text" bind:value={newDir}
+				placeholder="/opt/myapp or ~/stacks/nginx" />
+			<span class="hint">The compose.yml will be written here. Directory is created if it doesn't exist.</span>
+		</div>
+		<div class="form-group">
+			<label for="new-yaml" class="label-mono">compose.yml content</label>
+			<textarea id="new-yaml" class="yaml-editor tall" bind:value={newContent} spellcheck={false}></textarea>
+		</div>
+		<label class="form-check">
+			<input type="checkbox" bind:checked={newStart} />
+			Start stack immediately after creating
+		</label>
+		{#if newError}
+			<p class="error-banner">{newError}</p>
+		{/if}
+		<div class="modal-footer">
+			<Button variant="ghost" onclick={() => (newModal = false)}>Cancel</Button>
+			<Button variant="primary" loading={newSaving} onclick={createStack}>
+				{newSaving ? 'Creating…' : 'Create Stack'}
+			</Button>
 		</div>
 	</div>
-{/if}
+</Modal>
 
-<!-- Delete / Down Confirm Modal -->
-{#if deleteTarget}
-	<div class="modal-backdrop" onclick={() => { deleteTarget = null; }} role="presentation">
-		<div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Confirm stack down">
-			<h2>Stop stack "{deleteTarget}"?</h2>
-			<p>This runs <code>docker compose down</code>, stopping and removing all containers for this stack.</p>
-			<label class="form-check">
-				<input type="checkbox" bind:checked={deleteVolumes} />
-				Also remove named volumes (<code>--volumes</code>)
-			</label>
-			<div class="modal-footer">
-				<button onclick={() => { deleteTarget = null; }}>Cancel</button>
-				<button class="danger" onclick={doDelete}>Stop Stack</button>
-			</div>
-		</div>
-	</div>
-{/if}
+<ConfirmDialog
+	open={!!deleteTarget}
+	tone="danger"
+	title="Bring stack down"
+	message="Stop and remove all containers for this stack?"
+	detail={deleteTarget ?? ''}
+	consequences={[
+		'Equivalent to `docker compose down`.',
+		'All services in this stack will stop and their containers will be deleted.',
+		deleteVolumes ? 'Named volumes for this stack will also be removed.' : 'Named volumes are preserved.'
+	]}
+	confirmLabel="Bring down"
+	busy={deleteBusy}
+	onconfirm={doDelete}
+	oncancel={() => (deleteTarget = null)}
+/>
+
+<ConfirmDialog
+	open={pending !== null}
+	tone={pending?.tone ?? 'warning'}
+	title={pending?.title ?? ''}
+	message={pending?.message ?? ''}
+	detail={pending?.detail}
+	consequences={pending?.consequences ?? []}
+	confirmLabel={pending?.confirmLabel ?? 'Confirm'}
+	onconfirm={runPending}
+	oncancel={() => (pending = null)}
+/>
 
 <style>
-.page { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+	.stacks-tab { display: flex; flex-direction: column; gap: 12px; }
 
-.page-header {
-	display: flex; align-items: center; justify-content: space-between;
-	margin-bottom: 1rem; gap: 1rem;
-}
-.header-left { display: flex; align-items: center; gap: 1rem; }
-.back-link { color: var(--accent); text-decoration: none; font-size: 0.85rem; }
-.back-link:hover { text-decoration: underline; }
-h1 { font-size: 1.3rem; font-weight: 600; margin: 0; }
+	.tab-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+	.lead { display: flex; align-items: baseline; gap: 10px; }
+	.lead h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
+	.lead-sub { font-size: 11px; color: var(--text-faint); }
 
-.sub-nav {
-	display: flex; gap: 0.25rem; margin-bottom: 1.5rem;
-	border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; flex-wrap: wrap;
-}
-.sub-nav a {
-	padding: 0.3rem 0.8rem; border-radius: 4px; text-decoration: none;
-	color: var(--fg-muted); font-size: 0.85rem;
-}
-.sub-nav a:hover { background: var(--bg-hover); color: var(--fg); }
-.sub-nav a.active { background: var(--accent); color: #fff; }
-.sub-nav a.placeholder { opacity: 0.45; cursor: default; pointer-events: none; }
+	.state-msg { padding: 24px; text-align: center; color: var(--text-faint); font-size: 13px; }
+	.banner, .empty-state {
+		background: var(--bg-elev); border: 1px solid var(--line);
+		border-radius: var(--r-lg); padding: 32px; text-align: center;
+		color: var(--text-dim);
+	}
+	.empty-state p { margin: 6px 0; }
+	.empty-state code { background: var(--bg-elev-2); padding: 1px 6px; border-radius: 3px; font-family: var(--font-mono); font-size: 12px; }
+	.banner strong { display: block; margin-bottom: 6px; font-size: 14px; color: var(--text); }
+	.banner code { background: var(--bg-elev-2); padding: 1px 6px; border-radius: 3px; font-family: var(--font-mono); font-size: 12px; }
+	.error-banner {
+		padding: 8px 12px;
+		background: var(--crit-soft);
+		border: 1px solid color-mix(in srgb, var(--crit) 40%, transparent);
+		border-radius: var(--r-md);
+		color: var(--crit);
+		font-size: 12px;
+		margin: 0;
+	}
 
-.unavailable-banner {
-	background: var(--bg-card); border: 1px solid var(--border);
-	border-radius: 8px; padding: 2rem; text-align: center; color: var(--fg-muted);
-}
-.unavailable-banner strong { display: block; margin-bottom: 0.4rem; font-size: 1rem; color: var(--fg); }
-.unavailable-banner code { background: var(--bg-hover); padding: 0.1rem 0.3rem; border-radius: 3px; }
+	.muted { color: var(--text-faint); }
+	.pad { padding: 16px; margin: 0; }
 
-.empty-state { text-align: center; padding: 3rem 1rem; color: var(--fg-muted); }
-.empty-state p { margin: 0.4rem 0; }
-.empty-state button { margin-top: 1rem; }
+	.stack-list { display: flex; flex-direction: column; gap: 8px; }
 
-.centre { text-align: center; margin-top: 3rem; }
-.muted { color: var(--fg-muted); }
-.pad { padding: 1rem 1.25rem; }
-.error-msg { color: var(--danger); font-size: 0.88rem; }
+	.stack-card {
+		background: var(--bg-elev);
+		border: 1px solid var(--line);
+		border-radius: var(--r-lg);
+		overflow: hidden;
+		transition: border-color 120ms;
+	}
+	.stack-card.expanded { border-color: var(--line-strong); }
 
-/* ── Stack cards ── */
-.stack-list { display: flex; flex-direction: column; gap: 0.75rem; }
+	.stack-header {
+		display: flex; align-items: center; gap: 10px;
+		padding: 10px 14px; cursor: pointer; user-select: none;
+		transition: background 120ms;
+	}
+	.stack-header:hover { background: var(--bg-hover); }
 
-.stack-card {
-	background: var(--bg-card); border: 1px solid var(--border);
-	border-radius: 8px; overflow: hidden;
-	transition: border-color 0.15s;
-}
-.stack-card.expanded { border-color: var(--accent); }
+	.status-dot {
+		width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+	}
+	.status-dot.status-running { background: var(--ok); }
+	.status-dot.status-partial { background: var(--warn); }
+	.status-dot.status-stopped { background: var(--offline); }
+	.status-dot.status-empty { background: var(--offline); }
+	.status-dot.status-error { background: var(--crit); }
+	.status-dot.status-unknown { background: var(--text-faint); }
 
-.stack-header {
-	display: flex; align-items: center; gap: 0.75rem;
-	padding: 0.85rem 1rem; cursor: pointer; user-select: none;
-}
-.stack-header:hover { background: var(--bg-hover); }
+	.stack-identity {
+		flex: 1; min-width: 0;
+		display: flex; flex-direction: column; gap: 2px;
+	}
+	.stack-name { font-weight: 500; font-size: 13px; color: var(--text); }
+	.stack-dir { font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
 
-.status-dot {
-	width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
-}
-.status-dot.status-running { background: #2ecc71; }
-.status-dot.status-partial { background: #f39c12; }
-.status-dot.status-stopped { background: var(--fg-muted); }
+	.stack-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+	.svc-count { font-size: 11px; color: var(--text-dim); }
 
-.stack-identity { flex: 1; min-width: 0; }
-.stack-name { font-weight: 600; font-size: 0.95rem; display: block; }
-.stack-dir { font-size: 0.78rem; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 400px; }
+	.stack-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
-.stack-meta { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+	.chev { color: var(--text-faint); transition: transform 200ms; flex-shrink: 0; display: inline-flex; }
+	.chev.open { transform: rotate(180deg); }
 
-.svc-count { font-size: 0.82rem; font-weight: 500; }
-.svc-count.status-running { color: #2ecc71; }
-.svc-count.status-partial { color: #f39c12; }
-.svc-count.status-stopped { color: var(--fg-muted); }
+	.action-output {
+		margin: 0; padding: 10px 14px;
+		font-family: var(--font-mono); font-size: 11px;
+		background: var(--bg);
+		color: var(--text-dim);
+		border-top: 1px solid var(--line);
+		white-space: pre-wrap; max-height: 120px; overflow-y: auto;
+	}
 
-.status-pill {
-	font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 99px;
-	text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
-}
-.status-pill.status-running { background: #2ecc7120; color: #2ecc71; }
-.status-pill.status-partial { background: #f39c1220; color: #f39c12; }
-.status-pill.status-stopped { background: var(--bg-hover); color: var(--fg-muted); }
+	.stack-detail { border-top: 1px solid var(--line); }
 
-.stack-actions { display: flex; gap: 0.3rem; flex-shrink: 0; }
-.act-btn {
-	background: var(--bg-hover); border: 1px solid var(--border);
-	border-radius: 4px; padding: 0.2rem 0.5rem; cursor: pointer;
-	font-size: 0.9rem; color: var(--fg); line-height: 1;
-}
-.act-btn:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
-.act-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.tab-bar {
+		display: flex; gap: 6px; padding: 8px 14px;
+		border-bottom: 1px solid var(--line);
+		background: var(--bg-elev-2);
+		align-items: center;
+	}
+	.tab-spacer { flex: 1; }
 
-.chevron { font-size: 1rem; color: var(--fg-muted); transition: transform 0.2s; flex-shrink: 0; }
-.chevron.open { transform: rotate(180deg); }
+	.svc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+	.svc-table th {
+		text-align: left; padding: 6px 14px; font-weight: 500;
+		color: var(--text-faint); font-family: var(--font-mono);
+		font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+		border-bottom: 1px solid var(--line);
+	}
+	.svc-table td { padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; color: var(--text-dim); }
+	.svc-table tr:last-child td { border-bottom: none; }
+	.svc-table tr:hover td { background: var(--bg-hover); color: var(--text); }
 
-.action-output {
-	margin: 0; padding: 0.6rem 1rem; font-size: 0.78rem;
-	background: #111; color: #ccc; border-top: 1px solid var(--border);
-	white-space: pre-wrap; max-height: 120px; overflow-y: auto;
-}
+	.svc-name { font-weight: 500; color: var(--text); }
+	.cid { font-size: 10px; color: var(--text-faint); margin-left: 6px; }
 
-/* ── Stack detail ── */
-.stack-detail { border-top: 1px solid var(--border); }
+	.svc-state {
+		display: inline-block; font-size: 10px; padding: 1px 7px;
+		border-radius: var(--r-pill); font-weight: 500;
+		text-transform: uppercase; letter-spacing: 0.04em;
+		font-family: var(--font-mono);
+	}
+	.svc-running { background: var(--ok-soft); color: var(--ok); }
+	.svc-paused  { background: var(--warn-soft); color: var(--warn); }
+	.svc-exited  { background: rgba(107,114,128,0.14); color: var(--offline); }
+	.svc-dead    { background: var(--crit-soft); color: var(--crit); }
 
-.tab-bar {
-	display: flex; gap: 0.25rem; padding: 0.5rem 0.75rem;
-	border-bottom: 1px solid var(--border); background: var(--bg-hover);
-	align-items: center;
-}
-.tab-bar button {
-	padding: 0.25rem 0.75rem; border-radius: 4px; border: none;
-	background: transparent; color: var(--fg-muted); cursor: pointer; font-size: 0.83rem;
-}
-.tab-bar button:hover { background: var(--bg-card); color: var(--fg); }
-.tab-bar button.active { background: var(--accent); color: #fff; }
-.tab-spacer { flex: 1; }
-.danger-sm {
-	padding: 0.2rem 0.6rem; border-radius: 4px; border: 1px solid var(--danger);
-	color: var(--danger); background: transparent; cursor: pointer; font-size: 0.78rem;
-}
-.danger-sm:hover { background: var(--danger); color: #fff; }
+	.health-badge {
+		display: inline-block; font-size: 9px; padding: 1px 6px;
+		border-radius: var(--r-pill); font-weight: 500; margin-left: 4px;
+		font-family: var(--font-mono);
+	}
+	.health-ok       { background: var(--ok-soft); color: var(--ok); }
+	.health-bad      { background: var(--crit-soft); color: var(--crit); }
+	.health-starting { background: var(--warn-soft); color: var(--warn); }
 
-/* ── Services table ── */
-.svc-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
-.svc-table th {
-	text-align: left; padding: 0.4rem 0.75rem; font-weight: 500;
-	color: var(--fg-muted); border-bottom: 1px solid var(--border); font-size: 0.78rem;
-}
-.svc-table td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
-.svc-table tr:last-child td { border-bottom: none; }
-.svc-table tr:hover td { background: var(--bg-hover); }
+	.svc-status { color: var(--text-faint); font-size: 11px; }
+	.port-tag {
+		display: inline-block; background: var(--bg-elev-2); border: 1px solid var(--line);
+		border-radius: 3px; padding: 1px 6px; margin: 1px 2px 1px 0;
+		font-size: 10px;
+	}
 
-.svc-name { font-weight: 500; }
-.cid { font-family: monospace; font-size: 0.75rem; color: var(--fg-muted); margin-left: 0.4rem; }
+	.svc-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 
-.svc-state {
-	display: inline-block; font-size: 0.72rem; padding: 0.1rem 0.45rem;
-	border-radius: 99px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
-}
-.svc-running { background: #2ecc7120; color: #2ecc71; }
-.svc-paused  { background: #f39c1220; color: #f39c12; }
-.svc-exited  { background: #e74c3c20; color: #e74c3c; }
-.svc-dead    { background: #e74c3c30; color: #e74c3c; }
+	.file-panel { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+	.file-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+	.file-path { font-size: 11px; color: var(--text-faint); }
+	.file-actions { display: flex; gap: 6px; align-items: center; }
+	.yaml-editor {
+		width: 100%; box-sizing: border-box;
+		font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+		background: var(--bg); color: var(--text); border: 1px solid var(--line);
+		border-radius: var(--r-md); padding: 10px; resize: vertical; min-height: 300px;
+		tab-size: 2;
+	}
+	.yaml-editor.tall { min-height: 250px; }
+	.dirty-hint { color: var(--warn); font-size: 11px; margin: 0; }
 
-.health-badge {
-	display: inline-block; font-size: 0.68rem; padding: 0.1rem 0.4rem;
-	border-radius: 99px; font-weight: 500; margin-left: 0.3rem;
-}
-.health-ok      { background: #2ecc7115; color: #2ecc71; }
-.health-bad     { background: #e74c3c15; color: #e74c3c; }
-.health-starting{ background: #f39c1215; color: #f39c12; }
+	.logs-panel { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+	.logs-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+	.logs-toolbar label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+	.logs-toolbar select {
+		background: var(--bg-elev-2); border: 1px solid var(--line); border-radius: var(--r-md);
+		color: var(--text); padding: 4px 8px; font-size: 12px;
+	}
+	.log-output {
+		background: var(--bg); color: var(--text);
+		border: 1px solid var(--line);
+		border-radius: var(--r-md); padding: 10px;
+		font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+		overflow: auto; max-height: 400px; white-space: pre; tab-size: 2; margin: 0;
+	}
 
-.svc-status { color: var(--fg-muted); font-size: 0.8rem; }
+	.label-mono {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-faint);
+	}
 
-.svc-ports { font-size: 0.78rem; }
-.port-tag {
-	display: inline-block; background: var(--bg-hover); border: 1px solid var(--border);
-	border-radius: 3px; padding: 0.05rem 0.3rem; margin: 0.1rem 0.1rem 0 0;
-	font-family: monospace;
-}
+	.form-stack { display: flex; flex-direction: column; gap: 12px; }
+	.form-group { display: flex; flex-direction: column; gap: 4px; }
+	.form-group input {
+		background: var(--bg-elev-2); border: 1px solid var(--line);
+		color: var(--text); padding: 6px 10px; border-radius: var(--r-md); font-size: 12px;
+	}
+	.form-group input:focus { outline: none; border-color: var(--accent-line); }
+	.hint { font-size: 11px; color: var(--text-faint); }
+	.form-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; }
+	.form-check input { accent-color: var(--accent); }
+	.modal-footer { display: flex; justify-content: flex-end; gap: 8px; }
 
-.svc-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
-.sm-btn {
-	padding: 0.15rem 0.5rem; border-radius: 4px; border: 1px solid var(--border);
-	background: var(--bg-hover); color: var(--fg); cursor: pointer; font-size: 0.78rem;
-}
-.sm-btn:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
-.sm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-/* ── File editor ── */
-.file-panel { padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
-.file-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
-.file-path { font-family: monospace; font-size: 0.78rem; }
-.file-actions { display: flex; gap: 0.4rem; align-items: center; }
-.yaml-editor {
-	width: 100%; box-sizing: border-box;
-	font-family: monospace; font-size: 0.82rem; line-height: 1.5;
-	background: #0d1117; color: #c9d1d9; border: 1px solid var(--border);
-	border-radius: 4px; padding: 0.75rem; resize: vertical; min-height: 300px;
-	tab-size: 2;
-}
-.yaml-editor.tall { min-height: 250px; }
-.dirty-hint { color: #f39c12; font-size: 0.8rem; margin: 0; }
-.btn-primary.sm { padding: 0.15rem 0.6rem; font-size: 0.78rem; }
-
-/* ── Logs ── */
-.logs-panel { padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
-.logs-toolbar { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-.logs-toolbar label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.83rem; }
-.logs-toolbar select {
-	background: var(--bg-hover); border: 1px solid var(--border); border-radius: 4px;
-	color: var(--fg); padding: 0.15rem 0.4rem; font-size: 0.82rem;
-}
-.log-output {
-	background: #0d1117; color: #c9d1d9; border: 1px solid var(--border);
-	border-radius: 4px; padding: 0.75rem; font-size: 0.78rem; line-height: 1.5;
-	overflow: auto; max-height: 400px; white-space: pre; tab-size: 2; margin: 0;
-}
-
-/* ── Modals ── */
-.modal-backdrop {
-	position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-	display: flex; align-items: center; justify-content: center; z-index: 500;
-}
-.modal {
-	background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
-	padding: 1.5rem; width: 560px; max-width: 95vw; max-height: 90vh; overflow-y: auto;
-	display: flex; flex-direction: column; gap: 1rem;
-}
-.modal h2 { margin: 0; font-size: 1.1rem; }
-
-.form-group { display: flex; flex-direction: column; gap: 0.3rem; }
-.form-group label { font-size: 0.85rem; font-weight: 500; }
-.form-group input {
-	background: var(--bg-hover); border: 1px solid var(--border); border-radius: 4px;
-	color: var(--fg); padding: 0.4rem 0.6rem; font-size: 0.9rem;
-}
-.form-group input:focus { outline: 2px solid var(--accent); }
-.hint { font-size: 0.78rem; color: var(--fg-muted); }
-
-.form-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
-.form-check input { accent-color: var(--accent); width: 14px; height: 14px; }
-.form-check label { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
-.form-check code { background: var(--bg-hover); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.78rem; }
-
-.modal-footer { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem; }
-.modal-footer button {
-	padding: 0.4rem 0.9rem; border-radius: 5px; border: 1px solid var(--border);
-	background: var(--bg-hover); color: var(--fg); cursor: pointer; font-size: 0.88rem;
-}
-.modal-footer button.btn-primary {
-	background: var(--accent); color: #fff; border-color: var(--accent);
-}
-.modal-footer button.danger {
-	background: var(--danger, #e74c3c); color: #fff; border-color: transparent;
-}
-.modal-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* History modal */
-.history-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(2px); }
-.history-modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; width: 400px; max-width: 90vw; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
-.history-head { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: var(--bg); }
-.history-head h3 { margin: 0; font-size: 1.1rem; font-weight: 600; }
-.history-body { padding: 1rem; max-height: 400px; overflow-y: auto; }
-.version-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
-.version-list li { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
-.version-list .v-time { font-family: monospace; color: var(--fg-muted); font-size: 0.85rem; }
+	.history-body { display: flex; flex-direction: column; gap: 8px; }
+	.version-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+	.version-list li {
+		display: flex; align-items: center; justify-content: space-between;
+		padding: 8px 10px; background: var(--bg-elev-2);
+		border: 1px solid var(--line); border-radius: var(--r-md);
+	}
+	.v-time { color: var(--text-dim); font-size: 11px; }
 </style>

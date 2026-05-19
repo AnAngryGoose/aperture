@@ -138,7 +138,7 @@ input::placeholder, textarea::placeholder {
 .pill.warn { background: var(--warn-soft); color: var(--warn); }
 .pill.crit { background: var(--crit-soft); color: var(--crit); }
 .pill.offline, .pill.exited { background: rgba(107,114,128,.14); color: var(--offline); }
-.pill.paused { background: rgba(96,165,250,.14); color: var(--info); }
+.pill.paused { background: color-mix(in srgb, var(--info) 14%, transparent); color: var(--info); }
 
 /* Segmented control */
 .segmented {

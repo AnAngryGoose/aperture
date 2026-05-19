@@ -29,7 +29,7 @@ import (
 
 // Version identifies the running binary. Bump alongside changelog entries.
 // Surfaced via /api/system/info and the layout footer.
-const Version = "0.4.1-alpha.2"
+const Version = "0.0.4-alpha.3"
 
 func main() {
 	var (

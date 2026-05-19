@@ -4,6 +4,7 @@
 	import HostKindIcon from '$lib/components/primitives/HostKindIcon.svelte';
 	import Tag from '$lib/components/primitives/Tag.svelte';
 	import Icon from '$lib/components/primitives/Icon.svelte';
+	import Button from '$lib/components/primitives/Button.svelte';
 	import { fmtDuration, fmtBytes, fmtRelative } from '$lib/format';
 
 	interface Props {
@@ -53,10 +54,10 @@
 	</div>
 
 	<div class="actions">
-		<button class="action" onclick={() => onaction?.('restart')}>Restart</button>
-		<button class="action" onclick={() => onaction?.('ssh')}>SSH</button>
-		<button class="action" onclick={() => onaction?.('update')}>Update</button>
-		<button class="action danger" onclick={() => onaction?.('stop')}>Stop</button>
+		<Button variant="warning" size="sm" onclick={() => onaction?.('restart')}>Restart</Button>
+		<Button variant="ghost" size="sm" onclick={() => onaction?.('ssh')}>SSH</Button>
+		<Button variant="ghost" size="sm" onclick={() => onaction?.('update')}>Check for Updates</Button>
+		<Button variant="danger" size="sm" onclick={() => onaction?.('stop')}>Remove Host</Button>
 	</div>
 </header>
 
@@ -138,34 +139,7 @@
 		display: flex;
 		gap: 6px;
 		flex-shrink: 0;
-	}
-
-	.action {
-		padding: 6px 12px;
-		font-size: 12px;
-		font-family: var(--font-sans);
-		color: var(--text-dim);
-		background: var(--bg-elev);
-		border: 1px solid var(--line);
-		border-radius: var(--r-md);
-		cursor: pointer;
-		transition: background 120ms, color 120ms, border-color 120ms;
-	}
-
-	.action:hover {
-		background: var(--bg-hover);
-		color: var(--text);
-		border-color: var(--line-strong);
-	}
-
-	.action.danger {
-		color: var(--warn);
-		background: var(--warn-soft);
-		border-color: var(--warn);
-	}
-
-	.action.danger:hover {
-		background: var(--warn);
-		color: #fff;
+		flex-wrap: wrap;
+		justify-content: flex-end;
 	}
 </style>
